@@ -230,3 +230,51 @@ int RealESRGANSimple::process(const unsigned char* inputPixels, int w, int h,
     LOGI("Complete: %dx%d (%s)", outW, outH, useGpu ? "Vulkan GPU" : "CPU");
     return 0;
 }
+
+int RealESRGANSimple::sharpen(const unsigned char* inputPixels, int w, int h,
+                               unsigned char* outputPixels, float strength) {
+    LOGI("Sharpen: %dx%d, strength=%.2f", w, h, strength);
+
+    // 3x3 Gaussian blur → Unsharp Mask
+    // output = original + strength * (original - blurred)
+    // strength: 0.3〜1.0 推奨
+
+    if (strength < 0.01f) {
+        // 強度0ならコピーのみ
+        memcpy(outputPixels, inputPixels, (size_t)w * h * 4);
+        return 0;
+    }
+
+    // まずコピー（エッジの1px境界はそのまま）
+    memcpy(outputPixels, inputPixels, (size_t)w * h * 4);
+
+    // 内部ピクセルにUSMを適用
+    for (int y = 1; y < h - 1; y++) {
+        for (int x = 1; x < w - 1; x++) {
+            for (int c = 0; c < 3; c++) { // R, G, B のみ（Aはスキップ）
+                // 3x3 Gaussian近似（ボックスブラー）
+                int sum = 0;
+                for (int dy = -1; dy <= 1; dy++) {
+                    for (int dx = -1; dx <= 1; dx++) {
+                        sum += inputPixels[((y + dy) * w + (x + dx)) * 4 + c];
+                    }
+                }
+                float blurred = (float)sum / 9.0f;
+                float original = (float)inputPixels[(y * w + x) * 4 + c];
+                float detail = original - blurred;
+                float sharpened = original + strength * detail;
+
+                // clamp
+                if (sharpened < 0.0f) sharpened = 0.0f;
+                if (sharpened > 255.0f) sharpened = 255.0f;
+
+                outputPixels[(y * w + x) * 4 + c] = (unsigned char)(sharpened + 0.5f);
+            }
+            // Alpha はそのまま
+            outputPixels[(y * w + x) * 4 + 3] = inputPixels[(y * w + x) * 4 + 3];
+        }
+    }
+
+    LOGI("Sharpen complete: %dx%d", w, h);
+    return 0;
+}

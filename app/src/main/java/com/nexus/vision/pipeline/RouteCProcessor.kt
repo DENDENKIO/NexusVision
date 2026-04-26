@@ -17,20 +17,22 @@ class RouteCProcessor(private val context: Context) {
         return sr?.initialize(context) ?: false
     }
 
-    /**
-     * Bitmapを超解像する（呼び出し側で適切なサイズに制限済み）
-     */
     suspend fun process(bitmap: Bitmap): ProcessResult {
         val startTime = System.currentTimeMillis()
         val result = sr?.upscale(bitmap)
         val elapsed = System.currentTimeMillis() - startTime
 
         return if (result != null) {
-            Log.i(TAG, "SR success: ${bitmap.width}x${bitmap.height} -> ${result.width}x${result.height} in ${elapsed}ms")
-            ProcessResult(result, "NCNN Real-ESRGAN x4plus", elapsed, true)
+            val method = if (result.width > bitmap.width) {
+                "NCNN Real-ESRGAN 4× (Vulkan GPU)"
+            } else {
+                "Unsharp Mask シャープ化 (Native)"
+            }
+            Log.i(TAG, "Success: ${bitmap.width}x${bitmap.height} -> ${result.width}x${result.height} in ${elapsed}ms [$method]")
+            ProcessResult(result, method, elapsed, true)
         } else {
-            Log.w(TAG, "SR failed, returning original")
-            ProcessResult(bitmap, "passthrough (SR failed)", elapsed, false)
+            Log.w(TAG, "Failed, returning original")
+            ProcessResult(bitmap, "passthrough (failed)", elapsed, false)
         }
     }
 

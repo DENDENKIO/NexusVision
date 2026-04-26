@@ -193,6 +193,87 @@ Java_com_nexus_vision_ncnn_RealEsrganBridge_nativeProcess(
     return outBitmap;
 }
 
+JNIEXPORT jobject JNICALL
+Java_com_nexus_vision_ncnn_RealEsrganBridge_nativeSharpen(
+    JNIEnv* env, jclass clazz,
+    jobject inputBitmap,
+    jfloat strength) {
+
+    AndroidBitmapInfo inInfo;
+    if (AndroidBitmap_getInfo(env, inputBitmap, &inInfo) != 0) {
+        LOGE("Sharpen: failed to get bitmap info");
+        return nullptr;
+    }
+
+    if (inInfo.format != ANDROID_BITMAP_FORMAT_RGBA_8888) {
+        LOGE("Sharpen: unsupported format");
+        return nullptr;
+    }
+
+    int w = (int)inInfo.width;
+    int h = (int)inInfo.height;
+
+    LOGI("Sharpen: %dx%d, strength=%.2f", w, h, (float)strength);
+
+    void* inPixels = nullptr;
+    if (AndroidBitmap_lockPixels(env, inputBitmap, &inPixels) != 0) {
+        LOGE("Sharpen: lock failed");
+        return nullptr;
+    }
+
+    // stride考慮コピー
+    std::vector<unsigned char> inputData((size_t)w * h * 4);
+    for (int row = 0; row < h; row++) {
+        unsigned char* srcRow = (unsigned char*)inPixels + row * inInfo.stride;
+        unsigned char* dstRow = inputData.data() + row * w * 4;
+        memcpy(dstRow, srcRow, w * 4);
+    }
+    AndroidBitmap_unlockPixels(env, inputBitmap);
+
+    std::vector<unsigned char> outputData((size_t)w * h * 4);
+    int ret = RealESRGANSimple::sharpen(inputData.data(), w, h, outputData.data(), (float)strength);
+    inputData.clear();
+    inputData.shrink_to_fit();
+
+    if (ret != 0) {
+        LOGE("Sharpen failed: %d", ret);
+        return nullptr;
+    }
+
+    // 出力Bitmap（入力と同サイズ）
+    jclass bitmapClass = env->FindClass("android/graphics/Bitmap");
+    jclass configClass = env->FindClass("android/graphics/Bitmap$Config");
+    jfieldID argb8888Field = env->GetStaticFieldID(configClass, "ARGB_8888",
+                                                     "Landroid/graphics/Bitmap$Config;");
+    jobject argb8888 = env->GetStaticObjectField(configClass, argb8888Field);
+    jmethodID createMethod = env->GetStaticMethodID(bitmapClass, "createBitmap",
+        "(IILandroid/graphics/Bitmap$Config;)Landroid/graphics/Bitmap;");
+    jobject outBitmap = env->CallStaticObjectMethod(bitmapClass, createMethod,
+                                                      w, h, argb8888);
+    if (env->ExceptionCheck()) {
+        env->ExceptionDescribe();
+        env->ExceptionClear();
+        LOGE("Sharpen: OOM creating bitmap");
+        return nullptr;
+    }
+    if (!outBitmap) return nullptr;
+
+    AndroidBitmapInfo outInfo;
+    AndroidBitmap_getInfo(env, outBitmap, &outInfo);
+    void* outPixelsPtr = nullptr;
+    if (AndroidBitmap_lockPixels(env, outBitmap, &outPixelsPtr) != 0) return nullptr;
+
+    for (int row = 0; row < h; row++) {
+        unsigned char* srcRow = outputData.data() + row * w * 4;
+        unsigned char* dstRow = (unsigned char*)outPixelsPtr + row * outInfo.stride;
+        memcpy(dstRow, srcRow, w * 4);
+    }
+    AndroidBitmap_unlockPixels(env, outBitmap);
+
+    LOGI("Sharpen output: %dx%d", w, h);
+    return outBitmap;
+}
+
 JNIEXPORT void JNICALL
 Java_com_nexus_vision_ncnn_RealEsrganBridge_nativeRelease(
     JNIEnv* env, jclass clazz) {

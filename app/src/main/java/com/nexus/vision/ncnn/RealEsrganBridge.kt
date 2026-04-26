@@ -20,6 +20,9 @@ object RealEsrganBridge {
 
     external fun nativeProcess(inputBitmap: Bitmap): Bitmap?
 
+    // シャープ化（同サイズ出力、超解像不要な大画像向け）
+    external fun nativeSharpen(inputBitmap: Bitmap, strength: Float): Bitmap?
+
     external fun nativeRelease()
 
     external fun nativeIsLoaded(): Boolean

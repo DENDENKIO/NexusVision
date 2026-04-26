@@ -1,0 +1,74 @@
+> Task :app:objectboxPrepareBuild UP-TO-DATE
+> Task :app:preBuild UP-TO-DATE
+> Task :app:preDebugBuild UP-TO-DATE
+> Task :app:configureCMakeDebug[arm64-v8a]
+> Task :app:generateJsonModelDebug
+
+[Incubating] Problems report is available at: file:///C:/Users/MASTER-T/AndroidStudioProjects/NEXUSVision/build/reports/problems/problems-report.html
+
+Deprecated Gradle features were used in this build, making it incompatible with Gradle 10.
+
+You can use '--warning-mode all' to show the individual deprecation warnings and determine if they come from your own scripts or plugins.
+
+For more on this, please refer to https://docs.gradle.org/9.3.1/userguide/command_line_interface.html#sec:command_line_warnings in the Gradle documentation.
+
+BUILD SUCCESSFUL in 2s
+2 actionable tasks: 1 executed, 1 up-to-date
+Consider enabling configuration cache to speed up this build: https://docs.gradle.org/9.3.1/userguide/configuration_cache_enabling.html
+> Task :app:objectboxPrepareBuild UP-TO-DATE
+> Task :app:preBuild UP-TO-DATE
+> Task :app:preDebugBuild UP-TO-DATE
+> Task :app:configureCMakeDebug[arm64-v8a]
+
+> Task :app:buildCMakeDebug[arm64-v8a] FAILED
+C/C++: ninja: Entering directory `C:\Users\MASTER-T\AndroidStudioProjects\NEXUSVision\app\.cxx\Debug\1t61546u\arm64-v8a'
+C/C++: C:\Users\MASTER-T\AppData\Local\Android\Sdk\ndk\27.0.12077973\toolchains\llvm\prebuilt\windows-x86_64\bin\clang++.exe --target=aarch64-none-linux-android31 --sysroot=C:/Users/MASTER-T/AppData/Local/Android/Sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/windows-x86_64/sysroot -Drealesrgan_native_EXPORTS -isystem C:/Users/MASTER-T/AndroidStudioProjects/NEXUSVision/app/src/main/jni/ncnn-android-vulkan/arm64-v8a/include/ncnn -g -DANDROID -fdata-sections -ffunction-sections -funwind-tables -fstack-protector-strong -no-canonical-prefixes -D_FORTIFY_SOURCE=2 -Wformat -Werror=format-security  -std=c++17 -O2 -fvisibility=hidden -fexceptions -fno-limit-debug-info  -fPIC -fno-rtti -fno-exceptions -pthread -MD -MT CMakeFiles/realesrgan_native.dir/realesrgan_jni.cpp.o -MF CMakeFiles\realesrgan_native.dir\realesrgan_jni.cpp.o.d -o CMakeFiles/realesrgan_native.dir/realesrgan_jni.cpp.o -c C:/Users/MASTER-T/AndroidStudioProjects/NEXUSVision/app/src/main/jni/realesrgan_jni.cpp
+C/C++: C:/Users/MASTER-T/AndroidStudioProjects/NEXUSVision/app/src/main/jni/realesrgan_jni.cpp:133:5: error: cannot use 'try' with exceptions disabled
+C/C++:   133 |     try {
+C/C++:       |     ^
+C/C++: C:/Users/MASTER-T/AndroidStudioProjects/NEXUSVision/app/src/main/jni/realesrgan_jni.cpp:149:5: error: cannot use 'try' with exceptions disabled
+C/C++:   149 |     try {
+C/C++:       |     ^
+C/C++: 2 errors generated.
+
+[Incubating] Problems report is available at: file:///C:/Users/MASTER-T/AndroidStudioProjects/NEXUSVision/build/reports/problems/problems-report.html
+
+FAILURE: Build failed with an exception.
+
+* What went wrong:
+Execution failed for task ':app:buildCMakeDebug[arm64-v8a]'.
+> com.android.ide.common.process.ProcessException: ninja: Entering directory `C:\Users\MASTER-T\AndroidStudioProjects\NEXUSVision\app\.cxx\Debug\1t61546u\arm64-v8a'
+  [1/2] Building CXX object CMakeFiles/realesrgan_native.dir/realesrgan_jni.cpp.o
+  FAILED: CMakeFiles/realesrgan_native.dir/realesrgan_jni.cpp.o 
+  C:\Users\MASTER-T\AppData\Local\Android\Sdk\ndk\27.0.12077973\toolchains\llvm\prebuilt\windows-x86_64\bin\clang++.exe --target=aarch64-none-linux-android31 --sysroot=C:/Users/MASTER-T/AppData/Local/Android/Sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/windows-x86_64/sysroot -Drealesrgan_native_EXPORTS -isystem C:/Users/MASTER-T/AndroidStudioProjects/NEXUSVision/app/src/main/jni/ncnn-android-vulkan/arm64-v8a/include/ncnn -g -DANDROID -fdata-sections -ffunction-sections -funwind-tables -fstack-protector-strong -no-canonical-prefixes -D_FORTIFY_SOURCE=2 -Wformat -Werror=format-security  -std=c++17 -O2 -fvisibility=hidden -fexceptions -fno-limit-debug-info  -fPIC -fno-rtti -fno-exceptions -pthread -MD -MT CMakeFiles/realesrgan_native.dir/realesrgan_jni.cpp.o -MF CMakeFiles\realesrgan_native.dir\realesrgan_jni.cpp.o.d -o CMakeFiles/realesrgan_native.dir/realesrgan_jni.cpp.o -c C:/Users/MASTER-T/AndroidStudioProjects/NEXUSVision/app/src/main/jni/realesrgan_jni.cpp
+  C:/Users/MASTER-T/AndroidStudioProjects/NEXUSVision/app/src/main/jni/realesrgan_jni.cpp:133:5: error: cannot use 'try' with exceptions disabled
+    133 |     try {
+        |     ^
+  C:/Users/MASTER-T/AndroidStudioProjects/NEXUSVision/app/src/main/jni/realesrgan_jni.cpp:149:5: error: cannot use 'try' with exceptions disabled
+    149 |     try {
+        |     ^
+  2 errors generated.
+  ninja: build stopped: subcommand failed.
+  
+  C++ build system [build] failed while executing:
+      @echo off
+      "C:\\Users\\MASTER-T\\AppData\\Local\\Android\\Sdk\\cmake\\3.22.1\\bin\\ninja.exe" ^
+        -C ^
+        "C:\\Users\\MASTER-T\\AndroidStudioProjects\\NEXUSVision\\app\\.cxx\\Debug\\1t61546u\\arm64-v8a" ^
+        realesrgan_native
+    from C:\Users\MASTER-T\AndroidStudioProjects\NEXUSVision\app
+
+* Try:
+> Run with --stacktrace option to get the stack trace.
+> Run with --info or --debug option to get more log output.
+> Run with --scan to get full insights from a Build Scan (powered by Develocity).
+> Get more help at https://help.gradle.org.
+
+Deprecated Gradle features were used in this build, making it incompatible with Gradle 10.
+
+BUILD FAILED in 3s
+
+You can use '--warning-mode all' to show the individual deprecation warnings and determine if they come from your own scripts or plugins.
+
+For more on this, please refer to https://docs.gradle.org/9.3.1/userguide/command_line_interface.html#sec:command_line_warnings in the Gradle documentation.
+3 actionable tasks: 2 executed, 1 up-to-date
