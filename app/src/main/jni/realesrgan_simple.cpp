@@ -39,7 +39,8 @@ int RealESRGANSimple::load(const unsigned char* paramBuffer, int paramLen,
     LOGI("Param loaded, ret=%d", ret);
 
     // model はバイナリ形式 → DataReaderFromMemory を使用
-    ncnn::DataReaderFromMemory dr(reinterpret_cast<const char*>(modelBuffer));
+    const unsigned char* modelPtr = modelBuffer;
+    ncnn::DataReaderFromMemory dr(modelPtr);
     ret = net.load_model(dr);
     if (ret != 0) {
         LOGE("load_model from memory failed: %d", ret);
