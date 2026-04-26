@@ -279,107 +279,145 @@ int RealESRGANSimple::sharpen(const unsigned char* inputPixels, int w, int h,
     return 0;
 }
 
-int RealESRGANSimple::guidedBlend(const unsigned char* guidePixels,
-                                    const unsigned char* enhancedPixels,
-                                    int w, int h,
-                                    unsigned char* outputPixels,
-                                    float aiWeight) {
-    LOGI("GuidedBlend: %dx%d, aiWeight=%.2f", w, h, aiWeight);
+int RealESRGANSimple::laplacianBlend(const unsigned char* originalPixels,
+                                      const unsigned char* enhancedPixels,
+                                      int w, int h,
+                                      unsigned char* outputPixels,
+                                      float detailStrength,
+                                      float sharpenStrength) {
+    LOGI("LaplacianBlend: %dx%d, detail=%.2f, sharpen=%.2f", w, h, detailStrength, sharpenStrength);
 
-    // ガイデッド超解像の原理:
-    // 1. guidePixels（元画像リサイズ版）から高周波成分（エッジ・テクスチャ）を抽出
-    // 2. enhancedPixels（AI処理結果）から低周波成分（滑らかな領域の改善）を取得
-    // 3. 合成: output = guide_highfreq + enhanced_lowfreq
+    // ラプラシアンピラミッド合成の原理:
+    // 1. original（元画像リサイズ版）から高周波を抽出: original_highfreq = original - blurred(original)
+    // 2. enhanced（AI処理結果）から低周波を抽出: enhanced_lowfreq = blurred(enhanced)
+    // 3. 合成: output = enhanced_lowfreq + detailStrength * original_highfreq
 
     size_t pixels = (size_t)w * h;
 
-    // Step 1: ぼかし版を作成（5x5ボックスブラー）
-    std::vector<float> guideBlurR(pixels);
-    std::vector<float> guideBlurG(pixels);
-    std::vector<float> guideBlurB(pixels);
+    // --- Step 1: 5x5 ガウシアンぼかし準備 ---
+    std::vector<float> origR(pixels), origG(pixels), origB(pixels);
+    std::vector<float> enhR(pixels), enhG(pixels), enhB(pixels);
 
-    std::vector<float> enhBlurR(pixels);
-    std::vector<float> enhBlurG(pixels);
-    std::vector<float> enhBlurB(pixels);
+    for (size_t i = 0; i < pixels; i++) {
+        origR[i] = originalPixels[i * 4 + 0];
+        origG[i] = originalPixels[i * 4 + 1];
+        origB[i] = originalPixels[i * 4 + 2];
+        enhR[i] = enhancedPixels[i * 4 + 0];
+        enhG[i] = enhancedPixels[i * 4 + 1];
+        enhB[i] = enhancedPixels[i * 4 + 2];
+    }
 
-    const int radius = 2;
+    // 分離可能5x5ガウシアン: [1,4,6,4,1]/16
+    static const float kernel[5] = {1.0f/16, 4.0f/16, 6.0f/16, 4.0f/16, 1.0f/16};
+    std::vector<float> tmpR(pixels), tmpG(pixels), tmpB(pixels);
+    std::vector<float> origBlurR(pixels), origBlurG(pixels), origBlurB(pixels);
+    std::vector<float> enhBlurR(pixels), enhBlurG(pixels), enhBlurB(pixels);
+
+    // original のぼかし
     for (int y = 0; y < h; y++) {
         for (int x = 0; x < w; x++) {
-            float gSumR = 0, gSumG = 0, gSumB = 0;
-            float eSumR = 0, eSumG = 0, eSumB = 0;
-            int count = 0;
-            for (int dy = -radius; dy <= radius; dy++) {
-                for (int dx = -radius; dx <= radius; dx++) {
-                    int nx = x + dx;
-                    int ny = y + dy;
-                    if (nx >= 0 && nx < w && ny >= 0 && ny < h) {
-                        int idx = (ny * w + nx) * 4;
-                        gSumR += guidePixels[idx + 0];
-                        gSumG += guidePixels[idx + 1];
-                        gSumB += guidePixels[idx + 2];
-                        eSumR += enhancedPixels[idx + 0];
-                        eSumG += enhancedPixels[idx + 1];
-                        eSumB += enhancedPixels[idx + 2];
-                        count++;
-                    }
+            float sR = 0, sG = 0, sB = 0;
+            for (int k = -2; k <= 2; k++) {
+                int nx = std::max(0, std::min(x + k, w - 1));
+                float wt = kernel[k + 2];
+                sR += origR[y * w + nx] * wt;
+                sG += origG[y * w + nx] * wt;
+                sB += origB[y * w + nx] * wt;
+            }
+            tmpR[y * w + x] = sR;
+            tmpG[y * w + x] = sG;
+            tmpB[y * w + x] = sB;
+        }
+    }
+    for (int y = 0; y < h; y++) {
+        for (int x = 0; x < w; x++) {
+            float sR = 0, sG = 0, sB = 0;
+            for (int k = -2; k <= 2; k++) {
+                int ny = std::max(0, std::min(y + k, h - 1));
+                float wt = kernel[k + 2];
+                sR += tmpR[ny * w + x] * wt;
+                sG += tmpG[ny * w + x] * wt;
+                sB += tmpB[ny * w + x] * wt;
+            }
+            origBlurR[y * w + x] = sR;
+            origBlurG[y * w + x] = sG;
+            origBlurB[y * w + x] = sB;
+        }
+    }
+
+    // enhanced のぼかし
+    for (int y = 0; y < h; y++) {
+        for (int x = 0; x < w; x++) {
+            float sR = 0, sG = 0, sB = 0;
+            for (int k = -2; k <= 2; k++) {
+                int nx = std::max(0, std::min(x + k, w - 1));
+                float wt = kernel[k + 2];
+                sR += enhR[y * w + nx] * wt;
+                sG += enhG[y * w + nx] * wt;
+                sB += enhB[y * w + nx] * wt;
+            }
+            tmpR[y * w + x] = sR;
+            tmpG[y * w + x] = sG;
+            tmpB[y * w + x] = sB;
+        }
+    }
+    for (int y = 0; y < h; y++) {
+        for (int x = 0; x < w; x++) {
+            float sR = 0, sG = 0, sB = 0;
+            for (int k = -2; k <= 2; k++) {
+                int ny = std::max(0, std::min(y + k, h - 1));
+                float wt = kernel[k + 2];
+                sR += tmpR[ny * w + x] * wt;
+                sG += tmpG[ny * w + x] * wt;
+                sB += tmpB[ny * w + x] * wt;
+            }
+            enhBlurR[y * w + x] = sR;
+            enhBlurG[y * w + x] = sG;
+            enhBlurB[y * w + x] = sB;
+        }
+    }
+
+    // --- Step 2: 合成 (AI低周波 + 元画像高周波) ---
+    for (size_t i = 0; i < pixels; i++) {
+        float detR = (origR[i] - origBlurR[i]) * detailStrength;
+        float detG = (origG[i] - origBlurG[i]) * detailStrength;
+        float detB = (origB[i] - origBlurB[i]) * detailStrength;
+
+        float fR = enhBlurR[i] + detR;
+        float fG = enhBlurG[i] + detG;
+        float fB = enhBlurB[i] + detB;
+
+        if (fR < 0) fR = 0; if (fR > 255) fR = 255;
+        if (fG < 0) fG = 0; if (fG > 255) fG = 255;
+        if (fB < 0) fB = 0; if (fB > 255) fB = 255;
+
+        outputPixels[i * 4 + 0] = (unsigned char)(fR + 0.5f);
+        outputPixels[i * 4 + 1] = (unsigned char)(fG + 0.5f);
+        outputPixels[i * 4 + 2] = (unsigned char)(fB + 0.5f);
+        outputPixels[i * 4 + 3] = originalPixels[i * 4 + 3];
+    }
+
+    // --- Step 3: アンシャープマスク仕上げ ---
+    if (sharpenStrength > 0.01f) {
+        std::vector<unsigned char> temp(pixels * 4);
+        memcpy(temp.data(), outputPixels, pixels * 4);
+        for (int y = 1; y < h - 1; y++) {
+            for (int x = 1; x < w - 1; x++) {
+                for (int c = 0; c < 3; c++) {
+                    int sum = 0;
+                    for (int dy = -1; dy <= 1; dy++)
+                        for (int dx = -1; dx <= 1; dx++)
+                            sum += temp[((y+dy)*w + (x+dx))*4 + c];
+                    float blur = (float)sum / 9.0f;
+                    float orig = (float)temp[(y*w+x)*4 + c];
+                    float sharp = orig + sharpenStrength * (orig - blur);
+                    if (sharp < 0) sharp = 0; if (sharp > 255) sharp = 255;
+                    outputPixels[(y*w+x)*4 + c] = (unsigned char)(sharp + 0.5f);
                 }
             }
-            size_t pidx = y * w + x;
-            guideBlurR[pidx] = gSumR / count;
-            guideBlurG[pidx] = gSumG / count;
-            guideBlurB[pidx] = gSumB / count;
-            enhBlurR[pidx] = eSumR / count;
-            enhBlurG[pidx] = eSumG / count;
-            enhBlurB[pidx] = eSumB / count;
         }
     }
 
-    // Step 2: 合成
-    for (int y = 0; y < h; y++) {
-        for (int x = 0; x < w; x++) {
-            size_t pidx = y * w + x;
-            int idx = pidx * 4;
-
-            float gR = guidePixels[idx + 0];
-            float gG = guidePixels[idx + 1];
-            float gB = guidePixels[idx + 2];
-
-            float eR = enhancedPixels[idx + 0];
-            float eG = enhancedPixels[idx + 1];
-            float eB = enhancedPixels[idx + 2];
-
-            // 元画像のディテール（高周波）= 元 - ぼかし
-            float gDetailR = gR - guideBlurR[pidx];
-            float gDetailG = gG - guideBlurG[pidx];
-            float gDetailB = gB - guideBlurB[pidx];
-
-            // AI結果のベース（低周波）
-            float eBaseR = enhBlurR[pidx];
-            float eBaseG = enhBlurG[pidx];
-            float eBaseB = enhBlurB[pidx];
-
-            // 合成: AIベース + 元ディテール
-            float fusedR = eBaseR + gDetailR;
-            float fusedG = eBaseG + gDetailG;
-            float fusedB = eBaseB + gDetailB;
-
-            // さらにAI結果と直接ブレンド（aiWeightで調整）
-            float outR = fusedR * (1.0f - aiWeight) + eR * aiWeight;
-            float outG = fusedG * (1.0f - aiWeight) + eG * aiWeight;
-            float outB = fusedB * (1.0f - aiWeight) + eB * aiWeight;
-
-            // clamp
-            if (outR < 0) outR = 0; if (outR > 255) outR = 255;
-            if (outG < 0) outG = 0; if (outG > 255) outG = 255;
-            if (outB < 0) outB = 0; if (outB > 255) outB = 255;
-
-            outputPixels[idx + 0] = (unsigned char)(outR + 0.5f);
-            outputPixels[idx + 1] = (unsigned char)(outG + 0.5f);
-            outputPixels[idx + 2] = (unsigned char)(outB + 0.5f);
-            outputPixels[idx + 3] = guidePixels[idx + 3]; // alpha は元画像から
-        }
-    }
-
-    LOGI("GuidedBlend complete: %dx%d", w, h);
+    LOGI("LaplacianBlend complete: %dx%d", w, h);
     return 0;
 }

@@ -14,9 +14,8 @@ class NcnnSuperResolution {
         private const val TILE_SIZE = 32
 
         private const val SR_MAX_INPUT = 512
-        private const val OUTPUT_SIZE = 2048
-        private const val SHARPEN_STRENGTH = 0.6f
-        private const val AI_BLEND_WEIGHT = 0.4f  // AI結果の重み（0.4 = 元画像寄り）
+        private const val DETAIL_STRENGTH = 1.2f
+        private const val SHARPEN_STRENGTH = 0.4f
     }
 
     private var initialized = false
@@ -38,11 +37,9 @@ class NcnnSuperResolution {
     }
 
     /**
-     * ガイデッド超解像パイプライン:
-     *
-     * 1. 元画像を出力サイズにリサイズ（バイキュービック） → guide
-     * 2. 元画像をSR_MAX_INPUTに縮小 → AI超解像で出力サイズに → enhanced
-     * 3. guide と enhanced をガイデッドブレンド → 最終出力
+     * 超解像パイプライン
+     * 小画像(≤512px): 4×拡大
+     * 大画像(>512px): ラプラシアン合成（出力＝入力と同サイズ）
      */
     suspend fun upscale(bitmap: Bitmap): Bitmap? {
         if (!initialized || !RealEsrganBridge.nativeIsLoaded()) {
@@ -53,97 +50,95 @@ class NcnnSuperResolution {
         val maxSide = maxOf(bitmap.width, bitmap.height)
 
         return if (maxSide <= SR_MAX_INPUT) {
-            // 小さい画像: 単純に4×超解像（ガイド不要）
-            Log.i(TAG, "Small image: direct 4x SR (${bitmap.width}x${bitmap.height})")
+            Log.i(TAG, "Small image: direct 4x SR")
             processSuperResolution(bitmap)
         } else {
-            // 大きい画像: ガイデッド超解像
-            Log.i(TAG, "Large image: guided SR (${bitmap.width}x${bitmap.height})")
-            processGuidedSR(bitmap)
+            Log.i(TAG, "Large image: Laplacian pyramid SR (output = input size)")
+            processLaplacianSR(bitmap)
         }
     }
 
     /**
-     * ガイデッド超解像（大画像向け）
+     * ラプラシアンピラミッド超解像
+     * 出力サイズ ＝ 入力サイズ（縮小しない）
+     *
+     * 流れ:
+     * 1. input (例: 2172×2896) → そのまま original として使用
+     * 2. input を 512 に縮小 → AI 4×超解像 → 2048
+     * 3. AI結果を input サイズ (2172×2896) にアップスケール
+     * 4. ラプラシアン合成: original の高周波 + AI(upscaled) の低周波
+     * 5. 出力: 2172×2896（元と同じサイズ、ディテール保持＋AI改善）
      */
-    private fun processGuidedSR(bitmap: Bitmap): Bitmap? {
+    private fun processLaplacianSR(bitmap: Bitmap): Bitmap? {
         return try {
-            // Step 1: AI用の入力を作成（SR_MAX_INPUT以下に縮小）
-            val srInput = limitSize(bitmap, SR_MAX_INPUT)
+            val targetW = bitmap.width
+            val targetH = bitmap.height
+            Log.i(TAG, "Target output size: ${targetW}x${targetH}")
+
+            val original = ensureArgb(bitmap) ?: return null
+
+            // Step 1: AI用入力（512以下に縮小）
+            val srInput = limitSize(original, SR_MAX_INPUT)
             val srArgb = ensureArgb(srInput) ?: return null
 
-            Log.i(TAG, "Guided SR - AI input: ${srArgb.width}x${srArgb.height}")
+            Log.i(TAG, "AI input: ${srArgb.width}x${srArgb.height}")
 
-            // Step 2: AI超解像実行
+            // Step 2: AI超解像 (4×)
             val aiResult = RealEsrganBridge.nativeProcess(srArgb)
             if (srArgb !== srInput) srArgb.recycle()
-            if (srInput !== bitmap) srInput.recycle()
+            if (srInput !== original && srInput !== bitmap) srInput.recycle()
 
             if (aiResult == null) {
-                Log.e(TAG, "AI SR failed, falling back to sharpen")
-                return processSharpenOnly(bitmap)
+                Log.e(TAG, "AI SR failed, fallback to sharpen only")
+                val result = RealEsrganBridge.nativeSharpen(original, SHARPEN_STRENGTH)
+                if (original !== bitmap) original.recycle()
+                return result
             }
 
-            Log.i(TAG, "Guided SR - AI output: ${aiResult.width}x${aiResult.height}")
+            Log.i(TAG, "AI output: ${aiResult.width}x${aiResult.height}")
 
-            // Step 3: 元画像をAI出力と同じサイズにリサイズ（ガイド画像）
-            val guideArgb = ensureArgb(bitmap) ?: run {
-                aiResult.recycle()
-                return null
-            }
-            val guide = Bitmap.createScaledBitmap(
-                guideArgb, aiResult.width, aiResult.height, true
-            )
-            if (guideArgb !== bitmap) guideArgb.recycle()
-
-            Log.i(TAG, "Guided SR - guide: ${guide.width}x${guide.height}, blend weight=$AI_BLEND_WEIGHT")
-
-            // Step 4: ガイデッドブレンド
-            val blended = RealEsrganBridge.nativeGuidedBlend(guide, aiResult, AI_BLEND_WEIGHT)
-            guide.recycle()
+            // Step 3: AI結果を元画像サイズにアップスケール
+            val aiUpscaled = Bitmap.createScaledBitmap(aiResult, targetW, targetH, true)
             aiResult.recycle()
 
+            val aiArgb = ensureArgb(aiUpscaled) ?: run {
+                if (original !== bitmap) original.recycle()
+                return null
+            }
+            if (aiUpscaled !== aiArgb) aiUpscaled.recycle()
+
+            Log.i(TAG, "AI upscaled to target: ${aiArgb.width}x${aiArgb.height}")
+
+            // Step 4: ラプラシアンピラミッド合成
+            // original (元サイズ) の高周波 + aiArgb (元サイズ) の低周波
+            val blended = RealEsrganBridge.nativeLaplacianBlend(
+                original, aiArgb, DETAIL_STRENGTH, SHARPEN_STRENGTH
+            )
+            if (original !== bitmap) original.recycle()
+            aiArgb.recycle()
+
             if (blended != null) {
-                Log.i(TAG, "Guided SR done: ${blended.width}x${blended.height}")
+                Log.i(TAG, "Laplacian SR done: ${blended.width}x${blended.height} (same as input)")
             } else {
-                Log.e(TAG, "Guided blend failed")
+                Log.e(TAG, "Laplacian blend failed")
             }
             blended
         } catch (e: Exception) {
-            Log.e(TAG, "Guided SR error: ${e.message}")
+            Log.e(TAG, "Laplacian SR error: ${e.message}")
+            if (bitmap.config == Bitmap.Config.ARGB_8888) return bitmap
             null
         }
     }
 
-    /**
-     * 単純4×超解像（小画像用）
-     */
     private fun processSuperResolution(bitmap: Bitmap): Bitmap? {
         return try {
-            val argbInput = ensureArgb(bitmap) ?: return null
-            Log.i(TAG, "SR: ${argbInput.width}x${argbInput.height} -> ${argbInput.width * SCALE}x${argbInput.height * SCALE}")
-            val result = RealEsrganBridge.nativeProcess(argbInput)
-            if (argbInput !== bitmap) argbInput.recycle()
+            val argb = ensureArgb(bitmap) ?: return null
+            Log.i(TAG, "SR: ${argb.width}x${argb.height} -> ${argb.width * SCALE}x${argb.height * SCALE}")
+            val result = RealEsrganBridge.nativeProcess(argb)
+            if (argb !== bitmap) argb.recycle()
             result
         } catch (e: Exception) {
             Log.e(TAG, "SR error: ${e.message}")
-            null
-        }
-    }
-
-    /**
-     * シャープ化のみ（フォールバック）
-     */
-    private fun processSharpenOnly(bitmap: Bitmap): Bitmap? {
-        return try {
-            val input = limitSize(bitmap, OUTPUT_SIZE)
-            val argbInput = ensureArgb(input) ?: return null
-            val result = RealEsrganBridge.nativeSharpen(argbInput, SHARPEN_STRENGTH)
-            if (argbInput !== input && argbInput !== bitmap) argbInput.recycle()
-            if (input !== bitmap) input.recycle()
-            result
-        } catch (e: Exception) {
-            Log.e(TAG, "Sharpen error: ${e.message}")
             null
         }
     }

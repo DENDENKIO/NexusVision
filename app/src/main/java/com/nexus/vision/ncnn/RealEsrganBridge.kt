@@ -22,11 +22,12 @@ object RealEsrganBridge {
 
     external fun nativeSharpen(inputBitmap: Bitmap, strength: Float): Bitmap?
 
-    // ガイデッドブレンド: 元画像の構造 + AI結果を合成
-    external fun nativeGuidedBlend(
-        guideBitmap: Bitmap,
-        enhancedBitmap: Bitmap,
-        aiWeight: Float
+    // ラプラシアンピラミッド合成
+    external fun nativeLaplacianBlend(
+        originalBitmap: Bitmap,   // 元画像（出力サイズにリサイズ済み）
+        enhancedBitmap: Bitmap,   // AI超解像結果
+        detailStrength: Float,    // 元画像ディテールの強度（1.0=完全保持）
+        sharpenStrength: Float    // 仕上げのシャープ化強度（0.3〜0.5推奨）
     ): Bitmap?
 
     external fun nativeRelease()
