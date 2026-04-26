@@ -8,12 +8,15 @@
 #include <string>
 #include <vector>
 #include "realesrgan_simple.h"
+#include "gpu.h"
 
 #define TAG "RealESRGAN_JNI"
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO, TAG, __VA_ARGS__)
 #define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, TAG, __VA_ARGS__)
 
 static RealESRGANSimple* g_realesrgan = nullptr;
+
+static const int MAX_OUTPUT_PIXELS = 2048 * 2048;
 
 static std::vector<unsigned char> loadAsset(JNIEnv* env, jobject assetManager,
                                              const std::string& path) {
@@ -42,6 +45,9 @@ Java_com_nexus_vision_ncnn_RealEsrganBridge_nativeInit(
     jint scale,
     jint tileSize) {
 
+    // Vulkan初期化（アプリ起動後初回のみ）
+    ncnn::create_gpu_instance();
+
     if (g_realesrgan) {
         delete g_realesrgan;
         g_realesrgan = nullptr;
@@ -63,7 +69,8 @@ Java_com_nexus_vision_ncnn_RealEsrganBridge_nativeInit(
         return JNI_FALSE;
     }
 
-    g_realesrgan = new RealESRGANSimple();
+    // GPU自動検出（0=first GPU, -1にすると内部でauto）
+    g_realesrgan = new RealESRGANSimple(0);
     g_realesrgan->scale = scale;
     g_realesrgan->tileSize = tileSize;
     g_realesrgan->prepadding = 10;
@@ -77,7 +84,7 @@ Java_com_nexus_vision_ncnn_RealEsrganBridge_nativeInit(
         return JNI_FALSE;
     }
 
-    LOGI("RealESRGAN initialized successfully");
+    LOGI("RealESRGAN initialized (Vulkan GPU + FP16)");
     return JNI_TRUE;
 }
 
@@ -98,17 +105,23 @@ Java_com_nexus_vision_ncnn_RealEsrganBridge_nativeProcess(
     }
 
     if (inInfo.format != ANDROID_BITMAP_FORMAT_RGBA_8888) {
-        LOGE("Unsupported bitmap format: %d (need RGBA_8888)", inInfo.format);
+        LOGE("Unsupported format: %d", inInfo.format);
         return nullptr;
     }
 
-    int w = inInfo.width;
-    int h = inInfo.height;
+    int w = (int)inInfo.width;
+    int h = (int)inInfo.height;
     int sc = g_realesrgan->scale;
     int outW = w * sc;
     int outH = h * sc;
 
-    LOGI("Input: %dx%d, Output: %dx%d", w, h, outW, outH);
+    long long outPixels = (long long)outW * outH;
+    if (outPixels > MAX_OUTPUT_PIXELS) {
+        LOGE("Output too large: %dx%d = %lld pixels (max %d)", outW, outH, outPixels, MAX_OUTPUT_PIXELS);
+        return nullptr;
+    }
+
+    LOGI("Input: %dx%d -> Output: %dx%d", w, h, outW, outH);
 
     void* inPixels = nullptr;
     if (AndroidBitmap_lockPixels(env, inputBitmap, &inPixels) != 0) {
@@ -116,60 +129,67 @@ Java_com_nexus_vision_ncnn_RealEsrganBridge_nativeProcess(
         return nullptr;
     }
 
-    // stride を考慮してコピー
-    std::vector<unsigned char> inputData(w * h * 4);
+    std::vector<unsigned char> inputData;
+    inputData.resize(w * h * 4);
+
     for (int row = 0; row < h; row++) {
         unsigned char* srcRow = (unsigned char*)inPixels + row * inInfo.stride;
         unsigned char* dstRow = inputData.data() + row * w * 4;
         memcpy(dstRow, srcRow, w * 4);
     }
-
     AndroidBitmap_unlockPixels(env, inputBitmap);
 
-    // 出力バッファ
-    std::vector<unsigned char> outputData(outW * outH * 4, 0);
+    std::vector<unsigned char> outputData;
+    outputData.resize((size_t)outW * outH * 4, 0);
 
     int ret = g_realesrgan->process(inputData.data(), w, h, outputData.data());
+    inputData.clear();
+    inputData.shrink_to_fit();
+
     if (ret != 0) {
         LOGE("Process failed: %d", ret);
         return nullptr;
     }
 
-    // 出力 Bitmap 作成
+    // Bitmap作成
     jclass bitmapClass = env->FindClass("android/graphics/Bitmap");
     jclass configClass = env->FindClass("android/graphics/Bitmap$Config");
-
     jfieldID argb8888Field = env->GetStaticFieldID(configClass, "ARGB_8888",
                                                      "Landroid/graphics/Bitmap$Config;");
     jobject argb8888 = env->GetStaticObjectField(configClass, argb8888Field);
-
     jmethodID createMethod = env->GetStaticMethodID(bitmapClass, "createBitmap",
         "(IILandroid/graphics/Bitmap$Config;)Landroid/graphics/Bitmap;");
     jobject outBitmap = env->CallStaticObjectMethod(bitmapClass, createMethod,
                                                       outW, outH, argb8888);
+
+    if (env->ExceptionCheck()) {
+        env->ExceptionDescribe();
+        env->ExceptionClear();
+        LOGE("OOM creating bitmap %dx%d", outW, outH);
+        return nullptr;
+    }
     if (!outBitmap) {
-        LOGE("Failed to create output bitmap");
+        LOGE("Failed to create bitmap");
         return nullptr;
     }
 
     AndroidBitmapInfo outInfo;
     AndroidBitmap_getInfo(env, outBitmap, &outInfo);
 
-    void* outPixels = nullptr;
-    if (AndroidBitmap_lockPixels(env, outBitmap, &outPixels) != 0) {
+    void* outPixelsPtr = nullptr;
+    if (AndroidBitmap_lockPixels(env, outBitmap, &outPixelsPtr) != 0) {
         LOGE("Failed to lock output pixels");
         return nullptr;
     }
 
     for (int row = 0; row < outH; row++) {
         unsigned char* srcRow = outputData.data() + row * outW * 4;
-        unsigned char* dstRow = (unsigned char*)outPixels + row * outInfo.stride;
+        unsigned char* dstRow = (unsigned char*)outPixelsPtr + row * outInfo.stride;
         memcpy(dstRow, srcRow, outW * 4);
     }
-
     AndroidBitmap_unlockPixels(env, outBitmap);
 
-    LOGI("Output bitmap created: %dx%d", outW, outH);
+    LOGI("Output bitmap: %dx%d", outW, outH);
     return outBitmap;
 }
 
@@ -179,8 +199,9 @@ Java_com_nexus_vision_ncnn_RealEsrganBridge_nativeRelease(
     if (g_realesrgan) {
         delete g_realesrgan;
         g_realesrgan = nullptr;
-        LOGI("RealESRGAN released");
+        LOGI("Released");
     }
+    ncnn::destroy_gpu_instance();
 }
 
 JNIEXPORT jboolean JNICALL

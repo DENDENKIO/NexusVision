@@ -4,14 +4,13 @@ project(realesrgan_native CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 
-# ncnn (CPU版 static)
-set(ncnn_DIR "${CMAKE_SOURCE_DIR}/ncnn-android/${ANDROID_ABI}/lib/cmake/ncnn")
+# Vulkan版ncnnに変更
+set(ncnn_DIR "${CMAKE_SOURCE_DIR}/ncnn-android-vulkan/${ANDROID_ABI}/lib/cmake/ncnn")
 find_package(ncnn REQUIRED)
 
-# Android 標準ライブラリ
-find_library(jnigraphics-lib jnigraphics)
-find_library(log-lib log)
-find_library(android-lib android)
+find_library(JNIGRAPHICS_LIB jnigraphics)
+find_library(LOG_LIB log)
+find_library(ANDROID_LIB android)
 
 add_library(realesrgan_native SHARED
     realesrgan_simple.cpp
@@ -20,7 +19,7 @@ add_library(realesrgan_native SHARED
 
 target_link_libraries(realesrgan_native
     ncnn
-    ${jnigraphics-lib}
-    ${log-lib}
-    ${android-lib}
+    ${JNIGRAPHICS_LIB}
+    ${LOG_LIB}
+    ${ANDROID_LIB}
 )

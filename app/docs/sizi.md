@@ -1,1029 +1,691 @@
-チャットベースのUIなので、範囲選択は**チャット内にインタラクティブなクロップUIをメッセージとして埋め込む**方式で実装します。
 
-修正するファイルは4つです。
+
+
+
+**方針：**
+1. Vulkan GPUアクセラレーションを有効化（Mali-G68 MC4対応）
+2. `animevideov3` 軽量モデルを使用
+3. タイルサイズを32まで下げ可能に
+4. FP16を最大活用（メモリ半減）
+5. スレッド数を1:1:1に制限
+6. 入力サイズを安全な範囲に制限
+7. 段階的処理の基盤を用意
+
+まずVulkan対応ncnnに戻すため、ビルド設定からC++、Kotlin全てを修正します。
 
 ---
 
-### Step 1: `MainUiState` にクロップ選択状態を追加 & `MainViewModel.kt` 全体を修正
+### Step 1: ncnnライブラリを差し替え（差し替え済み）
 
-```kotlin
-// ファイルパス: app/src/main/java/com/nexus/vision/ui/MainViewModel.kt
+`ncnn-20260113-android-vulkan.zip` を使います。解凍して配置：
 
-package com.nexus.vision.ui
+```
+app/src/main/jni/ncnn-android-vulkan/
+├── arm64-v8a/
+│   ├── include/ncnn/
+│   └── lib/
+│       ├── libncnn.a
+│       └── cmake/ncnn/ncnnConfig.cmake
+```
 
-import android.content.ContentValues
-import android.content.Context
-import android.graphics.Bitmap
-import android.graphics.BitmapFactory
-import android.net.Uri
-import android.os.Environment
-import android.provider.MediaStore
-import android.util.Log
-import androidx.lifecycle.ViewModel
-import androidx.lifecycle.viewModelScope
-import com.nexus.vision.NexusApplication
-import com.nexus.vision.cache.L1PHashCache
-import com.nexus.vision.cache.L2InferenceCache
-import com.nexus.vision.deor.AdaptiveResizer
-import com.nexus.vision.deor.PHashCalculator
-import com.nexus.vision.engine.EngineState
-import com.nexus.vision.engine.NexusEngineManager
-import com.nexus.vision.engine.ThermalLevel
-import com.nexus.vision.image.DocumentSharpener
-import com.nexus.vision.image.DirectCrop100MP
-import com.nexus.vision.image.RegionDecoder
-import com.nexus.vision.ocr.MlKitOcrEngine
-import com.nexus.vision.ui.components.ChatMessage
-import com.nexus.vision.pipeline.RouteCProcessor
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.flow.MutableStateFlow
-import kotlinx.coroutines.flow.SharingStarted
-import kotlinx.coroutines.flow.StateFlow
-import kotlinx.coroutines.flow.asStateFlow
-import kotlinx.coroutines.flow.stateIn
-import kotlinx.coroutines.launch
-import kotlinx.coroutines.withContext
-import java.io.File
-import java.io.FileOutputStream
-import java.io.IOException
-import java.text.SimpleDateFormat
-import java.util.Date
-import java.util.Locale
+### Step 2: `CMakeLists.txt`
 
-data class MainUiState(
-    val isEngineReady: Boolean = false,
-    val isProcessing: Boolean = false,
-    val isDegraded: Boolean = false,
-    val statusMessage: String = "AI エンジン準備中...",
-    val errorMessage: String? = null,
-    val thermalLevelName: String = "NONE",
-    val messages: List<ChatMessage> = emptyList(),
-    val inputText: String = "",
-    val selectedImageUri: Uri? = null,
-    val selectedImagePath: String? = null,
-    // 範囲選択モード
-    val cropMode: Boolean = false,
-    val cropImageUri: Uri? = null,
-    val cropThumbnail: Bitmap? = null,
-    val cropImageWidth: Int = 0,
-    val cropImageHeight: Int = 0
+```cmake
+# ファイルパス: app/src/main/jni/CMakeLists.txt
+cmake_minimum_required(VERSION 3.22)
+project(realesrgan_native CXX)
+
+set(CMAKE_CXX_STANDARD 17)
+
+# Vulkan版ncnnに変更
+set(ncnn_DIR "${CMAKE_SOURCE_DIR}/ncnn-android-vulkan/${ANDROID_ABI}/lib/cmake/ncnn")
+find_package(ncnn REQUIRED)
+
+find_library(JNIGRAPHICS_LIB jnigraphics)
+find_library(LOG_LIB log)
+find_library(ANDROID_LIB android)
+
+add_library(realesrgan_native SHARED
+    realesrgan_simple.cpp
+    realesrgan_jni.cpp
 )
 
-class MainViewModel : ViewModel() {
-
-    companion object {
-        private const val TAG = "MainViewModel"
-    }
-
-    private val app = NexusApplication.getInstance()
-    private val engineManager = NexusEngineManager.getInstance()
-    private val l1Cache: L1PHashCache = app.l1Cache
-    private val l2Cache: L2InferenceCache = app.l2Cache
-
-    private val ocrEngine = MlKitOcrEngine()
-
-    private var routeC: RouteCProcessor? = null
-    private var routeCInitialized = false
-
-    private val _uiState = MutableStateFlow(MainUiState())
-    val uiState: StateFlow<MainUiState> = _uiState.asStateFlow()
-
-    val engineState: StateFlow<EngineState> = engineManager.state
-        .stateIn(viewModelScope, SharingStarted.Eagerly, EngineState.Idle)
-
-    val thermalLevel: StateFlow<ThermalLevel> =
-        app.thermalMonitor.thermalLevel
-            .stateIn(viewModelScope, SharingStarted.Eagerly, ThermalLevel.NONE)
-
-    init {
-        viewModelScope.launch {
-            engineManager.state.collect { state ->
-                _uiState.value = _uiState.value.copy(
-                    isEngineReady = state is EngineState.Ready,
-                    isProcessing = state is EngineState.Processing,
-                    isDegraded = state is EngineState.Degraded,
-                    statusMessage = when (state) {
-                        is EngineState.Idle -> "エンジン未ロード"
-                        is EngineState.Initializing -> "モデルロード中..."
-                        is EngineState.Ready -> "準備完了"
-                        is EngineState.Processing -> state.taskDescription
-                        is EngineState.Degraded -> "発熱のためテキストオンリーモード"
-                        is EngineState.Error -> "エラー: ${state.message}"
-                        is EngineState.Released -> "エンジン解放済み"
-                    },
-                    errorMessage = if (state is EngineState.Error) state.message else null
-                )
-            }
-        }
-
-        viewModelScope.launch {
-            thermalLevel.collect { level ->
-                _uiState.value = _uiState.value.copy(thermalLevelName = level.name)
-            }
-        }
-
-        addSystemMessage("NEXUS Vision へようこそ。エンジンをロードしてからメッセージを送信してください。")
-        initSuperResolution()
-    }
-
-    private fun initSuperResolution() {
-        viewModelScope.launch(Dispatchers.IO) {
-            routeC = RouteCProcessor(app.applicationContext)
-            routeCInitialized = routeC?.initialize() == true
-            if (routeCInitialized) {
-                Log.i(TAG, "Super-resolution ready")
-            } else {
-                Log.w(TAG, "Super-resolution init failed (will passthrough)")
-            }
-        }
-    }
-
-    override fun onCleared() {
-        super.onCleared()
-        ocrEngine.close()
-        routeC?.release()
-    }
-
-    // ── エンジン操作 ──
-
-    fun loadEngine() {
-        viewModelScope.launch {
-            addSystemMessage("エンジンをロード中...")
-            engineManager.loadEngine()
-            if (engineManager.state.value is EngineState.Ready) {
-                addSystemMessage("エンジンの準備が完了しました。メッセージを送信できます。")
-            }
-        }
-    }
-
-    // ── 入力操作 ──
-
-    fun updateInputText(text: String) {
-        _uiState.value = _uiState.value.copy(inputText = text)
-    }
-
-    fun setSelectedImage(uri: Uri) {
-        _uiState.value = _uiState.value.copy(
-            selectedImageUri = uri,
-            selectedImagePath = null
-        )
-    }
-
-    fun clearSelectedImage() {
-        _uiState.value = _uiState.value.copy(
-            selectedImageUri = null,
-            selectedImagePath = null
-        )
-    }
-
-    // ── 範囲選択モード ──
-
-    /** 範囲選択をキャンセル */
-    fun cancelCropMode() {
-        _uiState.value = _uiState.value.copy(
-            cropMode = false,
-            cropImageUri = null,
-            cropThumbnail = null,
-            cropImageWidth = 0,
-            cropImageHeight = 0
-        )
-    }
-
-    /** ユーザーが範囲を確定した */
-    fun onCropConfirmed(left: Float, top: Float, right: Float, bottom: Float) {
-        val uri = _uiState.value.cropImageUri ?: return
-        val imgW = _uiState.value.cropImageWidth
-        val imgH = _uiState.value.cropImageHeight
-
-        // 範囲選択モードを終了
-        _uiState.value = _uiState.value.copy(
-            cropMode = false,
-            cropThumbnail = null
-        )
-
-        // ユーザーメッセージ
-        val pxLeft = (left * imgW).toInt()
-        val pxTop = (top * imgH).toInt()
-        val pxRight = (right * imgW).toInt()
-        val pxBottom = (bottom * imgH).toInt()
-        addMessage(
-            ChatMessage(
-                role = ChatMessage.Role.USER,
-                text = "選択範囲をズーム: (${pxLeft},${pxTop})-(${pxRight},${pxBottom})"
-            )
-        )
-
-        val processingId = addProcessingMessage("選択範囲を超解像中...")
-
-        viewModelScope.launch {
-            try {
-                val response = processRegionZoom(uri, left, top, right, bottom, imgW, imgH)
-                replaceMessage(
-                    processingId,
-                    ChatMessage(id = processingId, role = ChatMessage.Role.ASSISTANT, text = response)
-                )
-            } catch (e: Exception) {
-                Log.e(TAG, "Region zoom failed", e)
-                replaceMessage(
-                    processingId,
-                    ChatMessage(id = processingId, role = ChatMessage.Role.ASSISTANT, text = "エラーが発生しました: ${e.message}")
-                )
-            }
-        }
-    }
-
-    // ── メッセージ送信 ──
-
-    fun sendMessage() {
-        val text = _uiState.value.inputText.trim()
-        val imageUri = _uiState.value.selectedImageUri
-
-        if (text.isBlank() && imageUri == null) return
-
-        val displayText = text.ifBlank { "この画像を分析してください" }
-
-        addMessage(
-            ChatMessage(
-                role = ChatMessage.Role.USER,
-                text = displayText,
-                imagePath = imageUri?.toString()
-            )
-        )
-
-        _uiState.value = _uiState.value.copy(
-            inputText = "",
-            selectedImageUri = null,
-            selectedImagePath = null
-        )
-
-        val isOcrRequest = imageUri != null && (
-                text.contains("読み取", ignoreCase = true) ||
-                text.contains("テキスト", ignoreCase = true) ||
-                text.contains("OCR", ignoreCase = true) ||
-                text.contains("文字", ignoreCase = true) ||
-                text.isBlank()
-        )
-
-        val isEnhanceRequest = imageUri != null && (
-                text.contains("鮮明", ignoreCase = true) ||
-                text.contains("高画質", ignoreCase = true) ||
-                text.contains("超解像", ignoreCase = true) ||
-                text.contains("enhance", ignoreCase = true) ||
-                text.contains("きれい", ignoreCase = true)
-        )
-        val isZoomRequest = imageUri != null && (
-                text.contains("ズーム", ignoreCase = true) ||
-                text.contains("拡大", ignoreCase = true) ||
-                text.contains("zoom", ignoreCase = true)
-        )
-
-        val needsEngine = !isOcrRequest && !isEnhanceRequest && !isZoomRequest
-
-        if (needsEngine && !_uiState.value.isEngineReady) {
-            addMessage(
-                ChatMessage(
-                    role = ChatMessage.Role.ASSISTANT,
-                    text = "エンジンがロードされていません。「エンジンをロード」ボタンを押してからテキスト送信してください。\n\n" +
-                            "画像の文字読み取り（OCR）や画像鮮鋭化はエンジンなしで利用できます。"
-                )
-            )
-            return
-        }
-
-        // ズーム要求 → 範囲選択モードに入る
-        if (isZoomRequest) {
-            enterCropMode(imageUri!!)
-            return
-        }
-
-        val processingLabel = when {
-            isOcrRequest -> "テキスト読み取り中..."
-            isEnhanceRequest -> "超解像処理中..."
-            imageUri != null -> "画像を分析中..."
-            else -> "考え中..."
-        }
-
-        val processingId = addProcessingMessage(processingLabel)
-
-        viewModelScope.launch {
-            try {
-                val response = when {
-                    isOcrRequest -> processOcrRequest(imageUri!!)
-                    isEnhanceRequest -> processEnhanceRequest(imageUri!!)
-                    imageUri != null -> processImageMessage(imageUri, displayText)
-                    else -> processTextMessage(displayText)
-                }
-
-                replaceMessage(
-                    processingId,
-                    ChatMessage(id = processingId, role = ChatMessage.Role.ASSISTANT, text = response)
-                )
-            } catch (e: Exception) {
-                Log.e(TAG, "Message processing failed", e)
-                replaceMessage(
-                    processingId,
-                    ChatMessage(id = processingId, role = ChatMessage.Role.ASSISTANT, text = "エラーが発生しました: ${e.message}")
-                )
-            }
-        }
-    }
-
-    /** ズーム要求時に範囲選択モードに入る */
-    private fun enterCropMode(uri: Uri) {
-        viewModelScope.launch(Dispatchers.IO) {
-            val context = app.applicationContext
-            val imgSize = RegionDecoder.getImageSize(context, uri)
-            val thumbnail = RegionDecoder.decodeThumbnail(context, uri, 800)
-
-            if (imgSize == null || thumbnail == null) {
-                addMessage(
-                    ChatMessage(
-                        role = ChatMessage.Role.ASSISTANT,
-                        text = "⚠️ 画像を読み込めませんでした"
-                    )
-                )
-                return@launch
-            }
-
-            val (w, h) = imgSize
-            addMessage(
-                ChatMessage(
-                    role = ChatMessage.Role.ASSISTANT,
-                    text = "画像上で拡大したい範囲をドラッグで選択してください (${w}×${h})"
-                )
-            )
-
-            _uiState.value = _uiState.value.copy(
-                cropMode = true,
-                cropImageUri = uri,
-                cropThumbnail = thumbnail,
-                cropImageWidth = w,
-                cropImageHeight = h
-            )
-        }
-    }
-
-    // ── 選択領域ズーム処理 ──
-
-    private suspend fun processRegionZoom(
-        uri: Uri,
-        left: Float, top: Float, right: Float, bottom: Float,
-        imgW: Int, imgH: Int
-    ): String = withContext(Dispatchers.IO) {
-        val context = app.applicationContext
-
-        val regionBitmap = RegionDecoder.decodeRegion(
-            context, uri, left, top, right, bottom, maxOutputSide = 2048
-        ) ?: return@withContext "⚠️ 選択領域のデコードに失敗しました"
-
-        val safeCopy = if (regionBitmap.config != Bitmap.Config.ARGB_8888) {
-            val copy = regionBitmap.copy(Bitmap.Config.ARGB_8888, false)
-            regionBitmap.recycle()
-            copy ?: return@withContext "⚠️ コピーに失敗しました"
-        } else {
-            regionBitmap
-        }
-
-        val result = routeC?.process(safeCopy)
-
-        if (result != null && result.success) {
-            val savedUri = saveBitmapToGallery(result.bitmap, "Zoom")
-            val responseText = buildString {
-                appendLine("✅ デジタルズーム完了 (${result.method})")
-                appendLine("📐 元画像: ${imgW}×${imgH}")
-                appendLine("📐 選択領域: ${safeCopy.width}×${safeCopy.height}")
-                appendLine("📐 出力: ${result.bitmap.width}×${result.bitmap.height}")
-                appendLine("⏱ ${result.timeMs}ms")
-                if (savedUri != null) {
-                    appendLine("📁 Pictures/NexusVision/ に保存")
-                }
-            }
-            safeCopy.recycle()
-            result.bitmap.recycle()
-            responseText
-        } else {
-            safeCopy.recycle()
-            "⚠️ 選択範囲の超解像に失敗しました"
-        }
-    }
-
-    // ── テキスト処理 ──
-
-    private suspend fun processTextMessage(text: String): String {
-        val cached = l2Cache.lookup(text)
-        if (cached != null) return cached.responseText
-
-        val result = engineManager.inferText(text)
-        return result.getOrElse { throw it }.also { response ->
-            l2Cache.put(text, response)
-        }
-    }
-
-    // ── 画像処理（DEOR 連携） ──
-
-    private suspend fun processImageMessage(uri: Uri, text: String): String =
-        withContext(Dispatchers.IO) {
-            val context = app.applicationContext
-
-            val inputStream = context.contentResolver.openInputStream(uri)
-                ?: throw IllegalStateException("画像を開けません")
-            val originalBitmap = BitmapFactory.decodeStream(inputStream)
-            inputStream.close()
-
-            if (originalBitmap == null) throw IllegalStateException("画像のデコードに失敗しました")
-
-            val pHash = PHashCalculator.calculate(originalBitmap)
-
-            val cachedEntry = l1Cache.lookup(pHash, category = "classify")
-            if (cachedEntry != null) {
-                originalBitmap.recycle()
-                return@withContext cachedEntry.resultText
-            }
-
-            val resizeResult = AdaptiveResizer.resize(originalBitmap)
-
-            val tempFile = saveBitmapToTemp(context, resizeResult.bitmap)
-
-            if (resizeResult.bitmap !== originalBitmap) {
-                resizeResult.bitmap.recycle()
-            }
-            originalBitmap.recycle()
-
-            val result = engineManager.inferImage(tempFile.absolutePath, text)
-            val response = result.getOrElse {
-                tempFile.delete()
-                throw it
-            }
-
-            l1Cache.put(
-                pHash = pHash,
-                resultText = response,
-                category = "classify",
-                entropy = resizeResult.entropy
-            )
-
-            tempFile.delete()
-            response
-        }
-
-    // ── OCR 処理 ──
-
-    private suspend fun processOcrRequest(uri: Uri): String =
-        withContext(Dispatchers.IO) {
-            val context = app.applicationContext
-
-            val sizeStream = context.contentResolver.openInputStream(uri)
-                ?: throw IllegalStateException("画像を開けません")
-            val (width, height) = DirectCrop100MP.getImageDimensions(sizeStream)
-            sizeStream.close()
-
-            val caseType = DocumentSharpener.detectCase(width, height)
-            Log.d(TAG, "OCR: image=${width}x${height} → Case $caseType")
-
-            val result = if (caseType == "A") {
-                val stream = context.contentResolver.openInputStream(uri)
-                    ?: throw IllegalStateException("画像を開けません")
-                val docResult = DocumentSharpener.processCaseA(stream, ocrEngine)
-                stream.close()
-                docResult
-            } else {
-                val coarseStream = context.contentResolver.openInputStream(uri)
-                    ?: throw IllegalStateException("画像を開けません")
-                val cropStream = context.contentResolver.openInputStream(uri)
-                    ?: throw IllegalStateException("画像を開けません")
-                val docResult = DocumentSharpener.processCaseB(coarseStream, cropStream, ocrEngine)
-                coarseStream.close()
-                cropStream.close()
-                docResult
-            }
-
-            if (result.fullText.isBlank()) {
-                "テキストを検出できませんでした。"
-            } else {
-                buildString {
-                    appendLine("【テキスト読み取り結果】(${result.pipeline}, ${result.processingTimeMs}ms)")
-                    appendLine()
-                    append(result.fullText)
-                }
-            }
-        }
-
-    // ── 超解像処理 ──
-
-    private suspend fun processEnhanceRequest(uri: Uri): String =
-        withContext(Dispatchers.IO) {
-            val context = app.applicationContext
-
-            val imgSize = RegionDecoder.getImageSize(context, uri)
-                ?: return@withContext "⚠️ 画像サイズを取得できません"
-            val (origW, origH) = imgSize
-
-            val decoded = RegionDecoder.decodeSafe(context, uri, 2048)
-                ?: return@withContext "⚠️ 画像のデコードに失敗しました"
-
-            val safeCopy = if (decoded.config != Bitmap.Config.ARGB_8888) {
-                val copy = decoded.copy(Bitmap.Config.ARGB_8888, false)
-                decoded.recycle()
-                copy ?: return@withContext "⚠️ 画像のコピーに失敗しました"
-            } else {
-                decoded
-            }
-
-            val result = routeC?.process(safeCopy)
-
-            if (result != null && result.success) {
-                val savedUri = saveBitmapToGallery(result.bitmap, "Enhanced")
-                val responseText = buildString {
-                    appendLine("✅ 超解像完了 (${result.method})")
-                    appendLine("📐 元画像: ${origW}×${origH}")
-                    appendLine("📐 処理: ${safeCopy.width}×${safeCopy.height} → ${result.bitmap.width}×${result.bitmap.height}")
-                    appendLine("⏱ ${result.timeMs}ms")
-                    if (savedUri != null) {
-                        appendLine("📁 Pictures/NexusVision/ に保存")
-                    }
-                    appendLine()
-                    appendLine("💡 部分拡大は「ズーム」と送信してください")
-                }
-                safeCopy.recycle()
-                result.bitmap.recycle()
-                responseText
-            } else {
-                val savedUri = saveBitmapToGallery(safeCopy, "Original")
-                safeCopy.recycle()
-                buildString {
-                    appendLine("⚠️ 超解像処理に失敗しました")
-                    appendLine("元画像をそのまま保存しました")
-                    if (savedUri != null) appendLine("📁 Pictures/NexusVision/ に保存済")
-                }
-            }
-        }
-
-    // ── ヘルパー ──
-
-    private fun saveBitmapToGallery(bitmap: Bitmap, prefix: String = "NEXUS"): Uri? {
-        val context = app.applicationContext
-        val timestamp = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date())
-        val filename = "${prefix}_${timestamp}.jpg"
-
-        val contentValues = ContentValues().apply {
-            put(MediaStore.Images.Media.DISPLAY_NAME, filename)
-            put(MediaStore.Images.Media.MIME_TYPE, "image/jpeg")
-            put(MediaStore.Images.Media.RELATIVE_PATH, Environment.DIRECTORY_PICTURES + "/NexusVision")
-            put(MediaStore.Images.Media.IS_PENDING, 1)
-        }
-
-        val resolver = context.contentResolver
-        val uri = resolver.insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, contentValues)
-
-        if (uri != null) {
-            try {
-                resolver.openOutputStream(uri)?.use { outputStream ->
-                    bitmap.compress(Bitmap.CompressFormat.JPEG, 95, outputStream)
-                }
-                contentValues.clear()
-                contentValues.put(MediaStore.Images.Media.IS_PENDING, 0)
-                resolver.update(uri, contentValues, null, null)
-                Log.i(TAG, "Saved to gallery: $filename (uri=$uri)")
-                return uri
-            } catch (e: IOException) {
-                Log.e(TAG, "Failed to save to gallery: ${e.message}")
-                resolver.delete(uri, null, null)
-            }
-        }
-        return null
-    }
-
-    private fun saveBitmapToTemp(context: Context, bitmap: Bitmap): File {
-        val tempFile = File(context.cacheDir, "nexus_temp_${System.currentTimeMillis()}.jpg")
-        FileOutputStream(tempFile).use { out ->
-            bitmap.compress(Bitmap.CompressFormat.JPEG, 90, out)
-        }
-        return tempFile
-    }
-
-    private fun addMessage(message: ChatMessage) {
-        _uiState.value = _uiState.value.copy(
-            messages = _uiState.value.messages + message
-        )
-    }
-
-    private fun addSystemMessage(text: String) {
-        addMessage(ChatMessage(role = ChatMessage.Role.SYSTEM, text = text))
-    }
-
-    private fun addProcessingMessage(label: String): String {
-        val message = ChatMessage(
-            role = ChatMessage.Role.ASSISTANT,
-            text = "",
-            isProcessing = true,
-            processingLabel = label
-        )
-        addMessage(message)
-        return message.id
-    }
-
-    private fun replaceMessage(id: String, newMessage: ChatMessage) {
-        _uiState.value = _uiState.value.copy(
-            messages = _uiState.value.messages.map {
-                if (it.id == id) newMessage else it
-            }
-        )
-    }
-}
+target_link_libraries(realesrgan_native
+    ncnn
+    ${JNIGRAPHICS_LIB}
+    ${LOG_LIB}
+    ${ANDROID_LIB}
+)
 ```
 
-### Step 2: `CropSelector.kt` を修正（`drawImage` の修正）
+### Step 3: `realesrgan_simple.h`
 
-```kotlin
-// ファイルパス: app/src/main/java/com/nexus/vision/ui/components/CropSelector.kt
-package com.nexus.vision.ui.components
+```cpp
+// ファイルパス: app/src/main/jni/realesrgan_simple.h
+#ifndef REALESRGAN_SIMPLE_H
+#define REALESRGAN_SIMPLE_H
 
-import android.graphics.Bitmap
-import androidx.compose.foundation.Canvas
-import androidx.compose.foundation.background
-import androidx.compose.foundation.gestures.detectDragGestures
-import androidx.compose.foundation.layout.Box
-import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.Spacer
-import androidx.compose.foundation.layout.aspectRatio
-import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.height
-import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.material3.Button
-import androidx.compose.material3.ButtonDefaults
-import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedButton
-import androidx.compose.material3.Text
-import androidx.compose.runtime.Composable
-import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.remember
-import androidx.compose.runtime.setValue
-import androidx.compose.ui.Alignment
-import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.clip
-import androidx.compose.ui.geometry.Offset
-import androidx.compose.ui.geometry.Size
-import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.asImageBitmap
-import androidx.compose.ui.graphics.drawscope.Stroke
-import androidx.compose.ui.input.pointer.pointerInput
-import androidx.compose.ui.layout.onSizeChanged
-import androidx.compose.ui.unit.IntOffset
-import androidx.compose.ui.unit.IntSize
-import androidx.compose.ui.unit.dp
+#include <string>
+#include <net.h>
 
-/**
- * 画像の範囲選択コンポーネント
- * サムネイルを表示し、ユーザーがドラッグで矩形を選択
- * 「この範囲を超解像」ボタンで確定
- */
-@Composable
-fun CropSelector(
-    thumbnail: Bitmap,
-    imageWidth: Int,
-    imageHeight: Int,
-    onConfirm: (left: Float, top: Float, right: Float, bottom: Float) -> Unit,
-    onCancel: () -> Unit,
-    modifier: Modifier = Modifier
-) {
-    var canvasSize by remember { mutableStateOf(IntSize.Zero) }
-    var dragStart by remember { mutableStateOf<Offset?>(null) }
-    var dragEnd by remember { mutableStateOf<Offset?>(null) }
-    var confirmed by remember { mutableStateOf(false) }
+class RealESRGANSimple {
+public:
+    RealESRGANSimple(int gpuid = -1); // -1=auto, 0=first GPU
+    ~RealESRGANSimple();
 
-    val imageBitmap = remember(thumbnail) { thumbnail.asImageBitmap() }
-    val aspectRatio = thumbnail.width.toFloat() / thumbnail.height.toFloat()
+    int load(const unsigned char* paramBuffer, int paramLen,
+             const unsigned char* modelBuffer, int modelLen);
+    int load(const std::string& paramPath, const std::string& modelPath);
 
-    Column(
-        modifier = modifier
-            .fillMaxWidth()
-            .padding(8.dp)
-            .clip(RoundedCornerShape(12.dp))
-            .background(MaterialTheme.colorScheme.surfaceVariant)
-            .padding(12.dp),
-        horizontalAlignment = Alignment.CenterHorizontally
-    ) {
-        Text(
-            text = "拡大したい範囲をドラッグで選択 (${imageWidth}×${imageHeight})",
-            style = MaterialTheme.typography.bodySmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant
-        )
+    // 入力: RGBA, 出力: RGBA
+    int process(const unsigned char* inputPixels, int w, int h,
+                unsigned char* outputPixels);
 
-        Spacer(modifier = Modifier.height(8.dp))
+    bool isLoaded() const { return loaded; }
 
-        // キャンバス（サムネイル＋選択矩形）
-        Canvas(
-            modifier = Modifier
-                .fillMaxWidth()
-                .aspectRatio(aspectRatio)
-                .clip(RoundedCornerShape(8.dp))
-                .onSizeChanged { canvasSize = it }
-                .pointerInput(Unit) {
-                    detectDragGestures(
-                        onDragStart = { offset ->
-                            dragStart = offset
-                            dragEnd = offset
-                            confirmed = false
-                        },
-                        onDrag = { change, _ ->
-                            change.consume()
-                            dragEnd = change.position
-                        },
-                        onDragEnd = { confirmed = true }
-                    )
-                }
-        ) {
-            // サムネイル描画
-            drawImage(
-                image = imageBitmap,
-                srcOffset = IntOffset.Zero,
-                srcSize = IntSize(imageBitmap.width, imageBitmap.height),
-                dstOffset = IntOffset.Zero,
-                dstSize = IntSize(size.width.toInt(), size.height.toInt())
-            )
+    int scale = 4;
+    int tileSize = 32;      // デフォルト32（安全重視）
+    int prepadding = 10;
 
-            // 選択矩形
-            val s = dragStart
-            val e = dragEnd
-            if (s != null && e != null) {
-                val rLeft = minOf(s.x, e.x).coerceIn(0f, size.width)
-                val rTop = minOf(s.y, e.y).coerceIn(0f, size.height)
-                val rRight = maxOf(s.x, e.x).coerceIn(0f, size.width)
-                val rBottom = maxOf(s.y, e.y).coerceIn(0f, size.height)
-                val rW = rRight - rLeft
-                val rH = rBottom - rTop
+private:
+    ncnn::Net net;
+    bool loaded;
+    int gpuid;
+    bool useGpu;
+};
 
-                if (rW > 4f && rH > 4f) {
-                    // 暗いオーバーレイ（選択外）
-                    val dimColor = Color.Black.copy(alpha = 0.5f)
-                    // 上
-                    drawRect(dimColor, Offset.Zero, Size(size.width, rTop))
-                    // 下
-                    drawRect(dimColor, Offset(0f, rBottom), Size(size.width, size.height - rBottom))
-                    // 左
-                    drawRect(dimColor, Offset(0f, rTop), Size(rLeft, rH))
-                    // 右
-                    drawRect(dimColor, Offset(rRight, rTop), Size(size.width - rRight, rH))
+#endif
+```
 
-                    // 選択枠
-                    drawRect(
-                        Color.Cyan,
-                        Offset(rLeft, rTop),
-                        Size(rW, rH),
-                        style = Stroke(width = 2.5f)
-                    )
+### Step 4: `realesrgan_simple.cpp`
+
+```cpp
+// ファイルパス: app/src/main/jni/realesrgan_simple.cpp
+#include "realesrgan_simple.h"
+#include <algorithm>
+#include <cstring>
+#include <cmath>
+#include <vector>
+#include <android/log.h>
+#include "datareader.h"
+#include "gpu.h"
+
+#define TAG "RealESRGAN"
+#define LOGI(...) __android_log_print(ANDROID_LOG_INFO, TAG, __VA_ARGS__)
+#define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, TAG, __VA_ARGS__)
+#define LOGW(...) __android_log_print(ANDROID_LOG_WARN, TAG, __VA_ARGS__)
+
+RealESRGANSimple::RealESRGANSimple(int gpuid) : gpuid(gpuid), loaded(false), useGpu(false) {
+    // Vulkan GPU が使えるか確認
+    int gpuCount = ncnn::get_gpu_count();
+    LOGI("Vulkan GPU count: %d", gpuCount);
+
+    if (gpuCount > 0) {
+        if (gpuid < 0) gpuid = 0; // auto -> first GPU
+        this->gpuid = gpuid;
+        useGpu = true;
+
+        net.opt.use_vulkan_compute = true;
+        // FP16で計算（メモリ半減・速度向上、画質差なし）
+        net.opt.use_fp16_packed = true;
+        net.opt.use_fp16_storage = true;
+        net.opt.use_fp16_arithmetic = true; // Mali-G68はFP16演算対応
+        net.opt.use_packing_layout = true;
+        // スレッド: GPU使用時は1で十分（GPU側で並列化）
+        net.opt.num_threads = 1;
+
+        LOGI("Vulkan GPU enabled: gpu_id=%d, FP16=ON", gpuid);
+    } else {
+        // Vulkan非対応 → CPUフォールバック
+        useGpu = false;
+        net.opt.use_vulkan_compute = false;
+        net.opt.use_fp16_packed = true;
+        net.opt.use_fp16_storage = true;
+        net.opt.use_fp16_arithmetic = false;
+        net.opt.use_packing_layout = true;
+        net.opt.num_threads = 2; // CPU時はスレッド2
+        LOGW("No Vulkan GPU, falling back to CPU (FP16 storage)");
+    }
+}
+
+RealESRGANSimple::~RealESRGANSimple() {
+    net.clear();
+}
+
+int RealESRGANSimple::load(const unsigned char* paramBuffer, int paramLen,
+                            const unsigned char* modelBuffer, int modelLen) {
+    // param はテキスト → null終端必要
+    std::vector<char> paramStr(paramLen + 1);
+    memcpy(paramStr.data(), paramBuffer, paramLen);
+    paramStr[paramLen] = '\0';
+
+    int ret = net.load_param_mem(paramStr.data());
+    if (ret != 0) {
+        LOGE("load_param_mem failed: %d", ret);
+        return -1;
+    }
+    LOGI("Param loaded, ret=%d", ret);
+
+    // model はバイナリ → DataReaderFromMemory
+    const unsigned char* modelPtr = modelBuffer;
+    ncnn::DataReaderFromMemory dr(modelPtr);
+    ret = net.load_model(dr);
+    if (ret != 0) {
+        LOGE("load_model failed: %d", ret);
+        return -2;
+    }
+
+    loaded = true;
+    LOGI("Model loaded (param=%d bytes, model=%d bytes, gpu=%s)",
+         paramLen, modelLen, useGpu ? "Vulkan" : "CPU");
+    return 0;
+}
+
+int RealESRGANSimple::load(const std::string& paramPath, const std::string& modelPath) {
+    int ret = net.load_param(paramPath.c_str());
+    if (ret != 0) {
+        LOGE("load_param(%s) failed: %d", paramPath.c_str(), ret);
+        return -1;
+    }
+
+    ret = net.load_model(modelPath.c_str());
+    if (ret != 0) {
+        LOGE("load_model(%s) failed: %d", modelPath.c_str(), ret);
+        return -2;
+    }
+
+    loaded = true;
+    LOGI("Model loaded from files (gpu=%s)", useGpu ? "Vulkan" : "CPU");
+    return 0;
+}
+
+int RealESRGANSimple::process(const unsigned char* inputPixels, int w, int h,
+                               unsigned char* outputPixels) {
+    if (!loaded) {
+        LOGE("Model not loaded!");
+        return -1;
+    }
+
+    const int TILE = tileSize;
+    const int outW = w * scale;
+    const int outH = h * scale;
+
+    const int xtiles = (w + TILE - 1) / TILE;
+    const int ytiles = (h + TILE - 1) / TILE;
+    const int totalTiles = xtiles * ytiles;
+
+    LOGI("Processing %dx%d -> %dx%d (tiles=%dx%d=%d, tile=%d, pad=%d, gpu=%s)",
+         w, h, outW, outH, xtiles, ytiles, totalTiles, TILE, prepadding,
+         useGpu ? "Vulkan" : "CPU");
+
+    for (int yi = 0; yi < ytiles; yi++) {
+        for (int xi = 0; xi < xtiles; xi++) {
+            int inTileX0 = xi * TILE;
+            int inTileY0 = yi * TILE;
+            int inTileX1 = std::min(inTileX0 + TILE, w);
+            int inTileY1 = std::min(inTileY0 + TILE, h);
+
+            int tileW = inTileX1 - inTileX0;
+            int tileH = inTileY1 - inTileY0;
+
+            // パディング付き入力
+            int padX0 = std::max(inTileX0 - prepadding, 0);
+            int padY0 = std::max(inTileY0 - prepadding, 0);
+            int padX1 = std::min(inTileX1 + prepadding, w);
+            int padY1 = std::min(inTileY1 + prepadding, h);
+
+            int padW = padX1 - padX0;
+            int padH = padY1 - padY0;
+
+            // RGBA → RGB
+            ncnn::Mat in(padW, padH, 3);
+            {
+                const float scale_val = 1.0f / 255.0f;
+                float* rPtr = in.channel(0);
+                float* gPtr = in.channel(1);
+                float* bPtr = in.channel(2);
+
+                for (int row = 0; row < padH; row++) {
+                    for (int col = 0; col < padW; col++) {
+                        int srcIdx = ((padY0 + row) * w + (padX0 + col)) * 4;
+                        int dstIdx = row * padW + col;
+                        rPtr[dstIdx] = inputPixels[srcIdx + 0] * scale_val;
+                        gPtr[dstIdx] = inputPixels[srcIdx + 1] * scale_val;
+                        bPtr[dstIdx] = inputPixels[srcIdx + 2] * scale_val;
+                    }
                 }
             }
-        }
 
-        Spacer(modifier = Modifier.height(8.dp))
-
-        // ボタン
-        Row {
-            OutlinedButton(onClick = onCancel) {
-                Text("キャンセル")
+            // 推論
+            ncnn::Extractor ex = net.create_extractor();
+            if (useGpu) {
+                ex.set_blob_vkallocator(net.opt.blob_vkallocator);
+                ex.set_workspace_vkallocator(net.opt.workspace_vkallocator);
+                ex.set_staging_vkallocator(net.opt.staging_vkallocator);
             }
-            Spacer(modifier = Modifier.width(12.dp))
-            Button(
-                onClick = {
-                    val s = dragStart
-                    val e = dragEnd
-                    if (s != null && e != null && canvasSize.width > 0 && canvasSize.height > 0) {
-                        val left = (minOf(s.x, e.x) / canvasSize.width).coerceIn(0f, 1f)
-                        val top = (minOf(s.y, e.y) / canvasSize.height).coerceIn(0f, 1f)
-                        val right = (maxOf(s.x, e.x) / canvasSize.width).coerceIn(0f, 1f)
-                        val bottom = (maxOf(s.y, e.y) / canvasSize.height).coerceIn(0f, 1f)
-                        if (right - left > 0.02f && bottom - top > 0.02f) {
-                            onConfirm(left, top, right, bottom)
+
+            ex.input("data", in);
+
+            ncnn::Mat out;
+            int ret = ex.extract("output", out);
+            if (ret != 0) {
+                LOGE("Inference failed tile (%d,%d): %d", xi, yi, ret);
+                // タイル失敗時: 元ピクセルをコピー（クラッシュしない）
+                for (int row = 0; row < tileH * scale; row++) {
+                    for (int col = 0; col < tileW * scale; col++) {
+                        int outX = inTileX0 * scale + col;
+                        int outY = inTileY0 * scale + row;
+                        if (outX < outW && outY < outH) {
+                            // 元ピクセルを最近傍で引き伸ばし
+                            int srcX = std::min(inTileX0 + col / scale, w - 1);
+                            int srcY = std::min(inTileY0 + row / scale, h - 1);
+                            int srcIdx = (srcY * w + srcX) * 4;
+                            int dstIdx = (outY * outW + outX) * 4;
+                            memcpy(outputPixels + dstIdx, inputPixels + srcIdx, 4);
                         }
                     }
-                },
-                enabled = confirmed && dragStart != null && dragEnd != null,
-                colors = ButtonDefaults.buttonColors(
-                    containerColor = MaterialTheme.colorScheme.primary
-                )
-            ) {
-                Text("この範囲を超解像")
+                }
+                LOGW("Tile (%d,%d) fallback to nearest-neighbor", xi, yi);
+                continue;
+            }
+
+            // 出力 float[0..1] → byte → 出力バッファ
+            int outPadW = out.w;
+            int outPadH = out.h;
+
+            int offsetX = (inTileX0 - padX0) * scale;
+            int offsetY = (inTileY0 - padY0) * scale;
+            int outTileW = tileW * scale;
+            int outTileH = tileH * scale;
+
+            const float* rOut = out.channel(0);
+            const float* gOut = out.channel(1);
+            const float* bOut = out.channel(2);
+
+            for (int row = 0; row < outTileH; row++) {
+                for (int col = 0; col < outTileW; col++) {
+                    int srcIdx = (offsetY + row) * outPadW + (offsetX + col);
+                    int outX = inTileX0 * scale + col;
+                    int outY = inTileY0 * scale + row;
+
+                    if (outX < outW && outY < outH && srcIdx < outPadW * outPadH) {
+                        int dstIdx = (outY * outW + outX) * 4;
+                        float r = std::max(0.0f, std::min(1.0f, rOut[srcIdx]));
+                        float g = std::max(0.0f, std::min(1.0f, gOut[srcIdx]));
+                        float b = std::max(0.0f, std::min(1.0f, bOut[srcIdx]));
+                        outputPixels[dstIdx + 0] = (unsigned char)(r * 255.0f + 0.5f);
+                        outputPixels[dstIdx + 1] = (unsigned char)(g * 255.0f + 0.5f);
+                        outputPixels[dstIdx + 2] = (unsigned char)(b * 255.0f + 0.5f);
+                        outputPixels[dstIdx + 3] = 255;
+                    }
+                }
+            }
+
+            int done = yi * xtiles + xi + 1;
+            if (done % 4 == 0 || done == totalTiles) {
+                LOGI("Progress: %d/%d (%.1f%%)", done, totalTiles,
+                     (float)done / totalTiles * 100.0f);
             }
         }
     }
+
+    LOGI("Complete: %dx%d (%s)", outW, outH, useGpu ? "Vulkan GPU" : "CPU");
+    return 0;
 }
 ```
 
-### Step 3: `MainScreen.kt` にクロップUIを統合
+### Step 5: `realesrgan_jni.cpp`
+
+```cpp
+// ファイルパス: app/src/main/jni/realesrgan_jni.cpp
+#include <jni.h>
+#include <android/bitmap.h>
+#include <android/asset_manager.h>
+#include <android/asset_manager_jni.h>
+#include <android/log.h>
+#include <cstring>
+#include <string>
+#include <vector>
+#include "realesrgan_simple.h"
+#include "gpu.h"
+
+#define TAG "RealESRGAN_JNI"
+#define LOGI(...) __android_log_print(ANDROID_LOG_INFO, TAG, __VA_ARGS__)
+#define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, TAG, __VA_ARGS__)
+
+static RealESRGANSimple* g_realesrgan = nullptr;
+
+static const int MAX_OUTPUT_PIXELS = 2048 * 2048;
+
+static std::vector<unsigned char> loadAsset(JNIEnv* env, jobject assetManager,
+                                             const std::string& path) {
+    AAssetManager* mgr = AAssetManager_fromJava(env, assetManager);
+    AAsset* asset = AAssetManager_open(mgr, path.c_str(), AASSET_MODE_BUFFER);
+    if (!asset) {
+        LOGE("Failed to open asset: %s", path.c_str());
+        return {};
+    }
+    size_t length = AAsset_getLength(asset);
+    std::vector<unsigned char> buffer(length);
+    AAsset_read(asset, buffer.data(), length);
+    AAsset_close(asset);
+    LOGI("Loaded asset %s: %zu bytes", path.c_str(), length);
+    return buffer;
+}
+
+extern "C" {
+
+JNIEXPORT jboolean JNICALL
+Java_com_nexus_vision_ncnn_RealEsrganBridge_nativeInit(
+    JNIEnv* env, jclass clazz,
+    jobject assetManager,
+    jstring paramPath,
+    jstring modelPath,
+    jint scale,
+    jint tileSize) {
+
+    // Vulkan初期化（アプリ起動後初回のみ）
+    ncnn::create_gpu_instance();
+
+    if (g_realesrgan) {
+        delete g_realesrgan;
+        g_realesrgan = nullptr;
+    }
+
+    const char* paramStr = env->GetStringUTFChars(paramPath, nullptr);
+    const char* modelStr = env->GetStringUTFChars(modelPath, nullptr);
+
+    LOGI("Init: param=%s, model=%s, scale=%d, tile=%d", paramStr, modelStr, scale, tileSize);
+
+    std::vector<unsigned char> paramBuf = loadAsset(env, assetManager, paramStr);
+    std::vector<unsigned char> modelBuf = loadAsset(env, assetManager, modelStr);
+
+    env->ReleaseStringUTFChars(paramPath, paramStr);
+    env->ReleaseStringUTFChars(modelPath, modelStr);
+
+    if (paramBuf.empty() || modelBuf.empty()) {
+        LOGE("Failed to load model files from assets");
+        return JNI_FALSE;
+    }
+
+    // GPU自動検出（0=first GPU, -1にすると内部でauto）
+    g_realesrgan = new RealESRGANSimple(0);
+    g_realesrgan->scale = scale;
+    g_realesrgan->tileSize = tileSize;
+    g_realesrgan->prepadding = 10;
+
+    int ret = g_realesrgan->load(paramBuf.data(), (int)paramBuf.size(),
+                                  modelBuf.data(), (int)modelBuf.size());
+    if (ret != 0) {
+        LOGE("Model load failed: %d", ret);
+        delete g_realesrgan;
+        g_realesrgan = nullptr;
+        return JNI_FALSE;
+    }
+
+    LOGI("RealESRGAN initialized (Vulkan GPU + FP16)");
+    return JNI_TRUE;
+}
+
+JNIEXPORT jobject JNICALL
+Java_com_nexus_vision_ncnn_RealEsrganBridge_nativeProcess(
+    JNIEnv* env, jclass clazz,
+    jobject inputBitmap) {
+
+    if (!g_realesrgan || !g_realesrgan->isLoaded()) {
+        LOGE("Model not initialized");
+        return nullptr;
+    }
+
+    AndroidBitmapInfo inInfo;
+    if (AndroidBitmap_getInfo(env, inputBitmap, &inInfo) != 0) {
+        LOGE("Failed to get bitmap info");
+        return nullptr;
+    }
+
+    if (inInfo.format != ANDROID_BITMAP_FORMAT_RGBA_8888) {
+        LOGE("Unsupported format: %d", inInfo.format);
+        return nullptr;
+    }
+
+    int w = (int)inInfo.width;
+    int h = (int)inInfo.height;
+    int sc = g_realesrgan->scale;
+    int outW = w * sc;
+    int outH = h * sc;
+
+    long long outPixels = (long long)outW * outH;
+    if (outPixels > MAX_OUTPUT_PIXELS) {
+        LOGE("Output too large: %dx%d = %lld pixels (max %d)", outW, outH, outPixels, MAX_OUTPUT_PIXELS);
+        return nullptr;
+    }
+
+    LOGI("Input: %dx%d -> Output: %dx%d", w, h, outW, outH);
+
+    void* inPixels = nullptr;
+    if (AndroidBitmap_lockPixels(env, inputBitmap, &inPixels) != 0) {
+        LOGE("Failed to lock input pixels");
+        return nullptr;
+    }
+
+    std::vector<unsigned char> inputData;
+    try {
+        inputData.resize(w * h * 4);
+    } catch (...) {
+        LOGE("Input buffer alloc failed");
+        AndroidBitmap_unlockPixels(env, inputBitmap);
+        return nullptr;
+    }
+
+    for (int row = 0; row < h; row++) {
+        unsigned char* srcRow = (unsigned char*)inPixels + row * inInfo.stride;
+        unsigned char* dstRow = inputData.data() + row * w * 4;
+        memcpy(dstRow, srcRow, w * 4);
+    }
+    AndroidBitmap_unlockPixels(env, inputBitmap);
+
+    std::vector<unsigned char> outputData;
+    try {
+        outputData.resize((size_t)outW * outH * 4, 0);
+    } catch (...) {
+        LOGE("Output buffer alloc failed: %dx%d", outW, outH);
+        return nullptr;
+    }
+
+    int ret = g_realesrgan->process(inputData.data(), w, h, outputData.data());
+    inputData.clear();
+    inputData.shrink_to_fit();
+
+    if (ret != 0) {
+        LOGE("Process failed: %d", ret);
+        return nullptr;
+    }
+
+    // Bitmap作成
+    jclass bitmapClass = env->FindClass("android/graphics/Bitmap");
+    jclass configClass = env->FindClass("android/graphics/Bitmap$Config");
+    jfieldID argb8888Field = env->GetStaticFieldID(configClass, "ARGB_8888",
+                                                     "Landroid/graphics/Bitmap$Config;");
+    jobject argb8888 = env->GetStaticObjectField(configClass, argb8888Field);
+    jmethodID createMethod = env->GetStaticMethodID(bitmapClass, "createBitmap",
+        "(IILandroid/graphics/Bitmap$Config;)Landroid/graphics/Bitmap;");
+    jobject outBitmap = env->CallStaticObjectMethod(bitmapClass, createMethod,
+                                                      outW, outH, argb8888);
+
+    if (env->ExceptionCheck()) {
+        env->ExceptionDescribe();
+        env->ExceptionClear();
+        LOGE("OOM creating bitmap %dx%d", outW, outH);
+        return nullptr;
+    }
+    if (!outBitmap) {
+        LOGE("Failed to create bitmap");
+        return nullptr;
+    }
+
+    AndroidBitmapInfo outInfo;
+    AndroidBitmap_getInfo(env, outBitmap, &outInfo);
+
+    void* outPixelsPtr = nullptr;
+    if (AndroidBitmap_lockPixels(env, outBitmap, &outPixelsPtr) != 0) {
+        LOGE("Failed to lock output pixels");
+        return nullptr;
+    }
+
+    for (int row = 0; row < outH; row++) {
+        unsigned char* srcRow = outputData.data() + row * outW * 4;
+        unsigned char* dstRow = (unsigned char*)outPixelsPtr + row * outInfo.stride;
+        memcpy(dstRow, srcRow, outW * 4);
+    }
+    AndroidBitmap_unlockPixels(env, outBitmap);
+
+    LOGI("Output bitmap: %dx%d", outW, outH);
+    return outBitmap;
+}
+
+JNIEXPORT void JNICALL
+Java_com_nexus_vision_ncnn_RealEsrganBridge_nativeRelease(
+    JNIEnv* env, jclass clazz) {
+    if (g_realesrgan) {
+        delete g_realesrgan;
+        g_realesrgan = nullptr;
+        LOGI("Released");
+    }
+    ncnn::destroy_gpu_instance();
+}
+
+JNIEXPORT jboolean JNICALL
+Java_com_nexus_vision_ncnn_RealEsrganBridge_nativeIsLoaded(
+    JNIEnv* env, jclass clazz) {
+    return (g_realesrgan && g_realesrgan->isLoaded()) ? JNI_TRUE : JNI_FALSE;
+}
+
+} // extern "C"
+```
+
+### Step 6: `NcnnSuperResolution.kt`
 
 ```kotlin
-// ファイルパス: app/src/main/java/com/nexus/vision/ui/MainScreen.kt
+// ファイルパス: app/src/main/java/com/nexus/vision/ncnn/NcnnSuperResolution.kt
+package com.nexus.vision.ncnn
 
-package com.nexus.vision.ui
+import android.content.Context
+import android.graphics.Bitmap
+import android.util.Log
 
-import androidx.compose.foundation.layout.Box
-import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.Spacer
-import androidx.compose.foundation.layout.WindowInsets
-import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.navigationBars
-import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.layout.windowInsetsPadding
-import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.items
-import androidx.compose.foundation.lazy.rememberLazyListState
-import androidx.compose.material3.Button
-import androidx.compose.material3.ExperimentalMaterial3Api
-import androidx.compose.material3.HorizontalDivider
-import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.Scaffold
-import androidx.compose.material3.Text
-import androidx.compose.material3.TopAppBar
-import androidx.compose.material3.TopAppBarDefaults
-import androidx.compose.runtime.Composable
-import androidx.compose.runtime.LaunchedEffect
-import androidx.compose.runtime.collectAsState
-import androidx.compose.runtime.getValue
-import androidx.compose.ui.Alignment
-import androidx.compose.ui.Modifier
-import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.unit.dp
-import androidx.lifecycle.viewmodel.compose.viewModel
-import com.nexus.vision.ui.components.ChatBubble
-import com.nexus.vision.ui.components.ChatInput
-import com.nexus.vision.ui.components.CropSelector
-
-@OptIn(ExperimentalMaterial3Api::class)
-@Composable
-fun MainScreen(
-    viewModel: MainViewModel = viewModel(),
-    onPickImage: () -> Unit = {},
-    onImageSelected: ((android.net.Uri) -> Unit) -> Unit = {}
-) {
-    val uiState by viewModel.uiState.collectAsState()
-    val listState = rememberLazyListState()
-
-    LaunchedEffect(Unit) {
-        onImageSelected { uri ->
-            viewModel.setSelectedImage(uri)
-        }
+class NcnnSuperResolution {
+    companion object {
+        private const val TAG = "NcnnSR"
+        // 軽量モデル（1.2MB、モバイル向け）
+        private const val PARAM_FILE = "models/realesr-animevideov3-x4.param"
+        private const val MODEL_FILE = "models/realesr-animevideov3-x4.bin"
+        private const val SCALE = 4
+        // タイルサイズ32（Mali-G68で安全なサイズ）
+        private const val TILE_SIZE = 32
+        // 入力上限: 4×で出力2048px → 入力512px
+        private const val MAX_INPUT_SIDE = 512
     }
 
-    LaunchedEffect(uiState.messages.size) {
-        if (uiState.messages.isNotEmpty()) {
-            listState.animateScrollToItem(uiState.messages.size - 1)
-        }
-    }
+    private var initialized = false
 
-    Scaffold(
-        topBar = {
-            TopAppBar(
-                title = {
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        Text(
-                            text = "NEXUS Vision",
-                            fontWeight = FontWeight.Bold
-                        )
-                        Spacer(modifier = Modifier.width(12.dp))
-                        ThermalBadge(levelName = uiState.thermalLevelName)
-                    }
-                },
-                colors = TopAppBarDefaults.topAppBarColors(
-                    containerColor = MaterialTheme.colorScheme.surface,
-                    titleContentColor = MaterialTheme.colorScheme.onSurface
-                )
+    fun initialize(context: Context): Boolean {
+        if (initialized && RealEsrganBridge.nativeIsLoaded()) return true
+        return try {
+            val result = RealEsrganBridge.nativeInit(
+                context.assets, PARAM_FILE, MODEL_FILE, SCALE, TILE_SIZE
             )
-        },
-        contentWindowInsets = WindowInsets(0),
-        bottomBar = {
-            Column(
-                modifier = Modifier
-                    .windowInsetsPadding(WindowInsets.navigationBars)
-            ) {
-                HorizontalDivider()
+            initialized = result
+            if (result) Log.i(TAG, "Initialized (Vulkan GPU + FP16, tile=$TILE_SIZE)")
+            else Log.e(TAG, "Init failed")
+            result
+        } catch (e: Exception) {
+            Log.e(TAG, "Init error: ${e.message}")
+            false
+        }
+    }
 
-                // 範囲選択モード中はクロップUIを表示
-                if (uiState.cropMode && uiState.cropThumbnail != null) {
-                    CropSelector(
-                        thumbnail = uiState.cropThumbnail!!,
-                        imageWidth = uiState.cropImageWidth,
-                        imageHeight = uiState.cropImageHeight,
-                        onConfirm = { left, top, right, bottom ->
-                            viewModel.onCropConfirmed(left, top, right, bottom)
-                        },
-                        onCancel = { viewModel.cancelCropMode() }
-                    )
-                } else {
-                    ChatInput(
-                        text = uiState.inputText,
-                        onTextChange = { viewModel.updateInputText(it) },
-                        selectedImageUri = uiState.selectedImageUri,
-                        onPickImage = onPickImage,
-                        onClearImage = { viewModel.clearSelectedImage() },
-                        onSend = { viewModel.sendMessage() },
-                        isEnabled = !uiState.isProcessing
-                    )
+    suspend fun upscale(bitmap: Bitmap): Bitmap? {
+        if (!initialized || !RealEsrganBridge.nativeIsLoaded()) {
+            Log.e(TAG, "Model not loaded")
+            return null
+        }
+        return try {
+            val input = limitSize(bitmap)
+            val argbInput = if (input.config != Bitmap.Config.ARGB_8888) {
+                input.copy(Bitmap.Config.ARGB_8888, false).also {
+                    if (input !== bitmap) input.recycle()
                 }
-            }
-        }
-    ) { innerPadding ->
-        Column(
-            modifier = Modifier
-                .fillMaxSize()
-                .padding(innerPadding)
-        ) {
-            if (!uiState.isEngineReady && !uiState.isProcessing) {
-                EngineLoadBanner(
-                    statusMessage = uiState.statusMessage,
-                    onLoadClick = { viewModel.loadEngine() }
-                )
+            } else {
+                input
             }
 
-            LazyColumn(
-                state = listState,
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .weight(1f)
-            ) {
-                items(
-                    items = uiState.messages,
-                    key = { it.id }
-                ) { message ->
-                    ChatBubble(message = message)
-                }
+            if (argbInput == null) {
+                Log.e(TAG, "ARGB copy failed")
+                return null
             }
-        }
-    }
-}
 
-@Composable
-private fun EngineLoadBanner(
-    statusMessage: String,
-    onLoadClick: () -> Unit
-) {
-    Box(
-        modifier = Modifier
-            .fillMaxWidth()
-            .padding(16.dp),
-        contentAlignment = Alignment.Center
-    ) {
-        Column(horizontalAlignment = Alignment.CenterHorizontally) {
-            Text(
-                text = statusMessage,
-                style = MaterialTheme.typography.bodyMedium,
-                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f)
-            )
-            Button(
-                onClick = onLoadClick,
-                modifier = Modifier.padding(top = 8.dp)
-            ) {
-                Text("エンジンをロード")
+            Log.i(TAG, "SR: ${argbInput.width}x${argbInput.height} -> ${argbInput.width * SCALE}x${argbInput.height * SCALE}")
+            val startTime = System.currentTimeMillis()
+            val result = RealEsrganBridge.nativeProcess(argbInput)
+            val elapsed = System.currentTimeMillis() - startTime
+
+            if (result != null) {
+                Log.i(TAG, "SR done: ${result.width}x${result.height} in ${elapsed}ms")
+            } else {
+                Log.e(TAG, "nativeProcess returned null (${elapsed}ms)")
             }
+
+            if (argbInput !== bitmap && argbInput !== input) argbInput.recycle()
+            if (input !== bitmap) input.recycle()
+
+            result
+        } catch (e: Exception) {
+            Log.e(TAG, "SR error: ${e.message}")
+            null
         }
     }
-}
 
-@Composable
-fun ThermalBadge(levelName: String) {
-    val color = when (levelName) {
-        "NONE", "LIGHT" -> MaterialTheme.colorScheme.outline
-        "MODERATE" -> MaterialTheme.colorScheme.tertiary
-        "SEVERE" -> MaterialTheme.colorScheme.error.copy(alpha = 0.7f)
-        else -> MaterialTheme.colorScheme.error
+    fun release() {
+        try { RealEsrganBridge.nativeRelease() } catch (e: Exception) { Log.e(TAG, "Release: ${e.message}") }
+        initialized = false
     }
 
-    if (levelName != "NONE") {
-        Text(
-            text = levelName,
-            style = MaterialTheme.typography.labelSmall,
-            color = color,
-            fontWeight = FontWeight.Bold
-        )
+    private fun limitSize(bitmap: Bitmap): Bitmap {
+        val maxSide = maxOf(bitmap.width, bitmap.height)
+        if (maxSide <= MAX_INPUT_SIDE) return bitmap
+        val ratio = MAX_INPUT_SIDE.toFloat() / maxSide
+        val newW = (bitmap.width * ratio).toInt().coerceAtLeast(16)
+        val newH = (bitmap.height * ratio).toInt().coerceAtLeast(16)
+        Log.i(TAG, "Limit: ${bitmap.width}x${bitmap.height} -> ${newW}x${newH}")
+        return Bitmap.createScaledBitmap(bitmap, newW, newH, true)
     }
 }
 ```
 
 ---
 
-**操作フロー：**
+**変更まとめ：**
 
-1. 画像を選択し「ズーム」と送信
-2. チャットに「範囲をドラッグで選択してください」とメッセージが出る
-3. 画面下部のチャット入力がクロップUIに切り替わる（サムネイル＋ドラッグ選択）
-4. 範囲をドラッグで選択 →「この範囲を超解像」ボタンを押す
-5. 選択範囲だけを `BitmapRegionDecoder` でデコード（OOMしない）→ 4×超解像 → 保存
-6. 結果がチャットに表示される
+| 対策 | 実装 |
+|---|---|
+| Vulkan GPU復活 | `ncnn-android-vulkan.zip` + `use_vulkan_compute=true` |
+| FP16フル活用 | `fp16_packed/storage/arithmetic` 全ON → メモリ半減 |
+| 軽量モデル | `animevideov3`（1.2MB、RRDB少ない） |
+| タイルサイズ32 | 1タイルの必要メモリを最小化 |
+| スレッド1 | GPU使用時はCPUスレッド1で十分 |
+| 入力512px制限 | 出力最大2048px、メモリ16MB |
+| タイル失敗時フォールバック | nearest-neighborで埋めてクラッシュ回避 |
+| C++バッファ確保try-catch | OOM時nullptr返却 |
+| Java OOMチェック | `ExceptionCheck`でBitmap作成失敗を検知 |
 
-**変更ファイルまとめ：**
+**変更ファイル一覧：**
 
 | ファイル | 操作 |
 |---|---|
-| `image/RegionDecoder.kt` | 前回作成済み・変更なし |
-| `ncnn/NcnnSuperResolution.kt` | 前回作成済み・変更なし |
-| `pipeline/RouteCProcessor.kt` | 前回作成済み・変更なし |
-| `ui/components/CropSelector.kt` | **新規作成** |
-| `ui/MainScreen.kt` | **置換** |
-| `ui/MainViewModel.kt` | **置換** |
+| `jni/CMakeLists.txt` | 置換（Vulkan版パス） |
+| `jni/realesrgan_simple.h` | 置換（gpuidコンストラクタ） |
+| `jni/realesrgan_simple.cpp` | 置換（Vulkan対応） |
+| `jni/realesrgan_jni.cpp` | 置換（GPU初期化/破棄） |
+| `ncnn/NcnnSuperResolution.kt` | 置換（tile=32, limit=512） |
+
+ncnnライブラリを `ncnn-android-vulkan` に差し替えてからリビルドしてください。`RouteCProcessor.kt`、`MainViewModel.kt`、`MainScreen.kt`、`CropSelector.kt`、`RegionDecoder.kt` は変更不要です。

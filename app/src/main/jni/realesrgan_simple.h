@@ -3,34 +3,32 @@
 #define REALESRGAN_SIMPLE_H
 
 #include <string>
-#include <vector>
-#include "net.h"
+#include <net.h>
 
 class RealESRGANSimple {
 public:
-    RealESRGANSimple();
+    RealESRGANSimple(int gpuid = -1); // -1=auto, 0=first GPU
     ~RealESRGANSimple();
 
-    // メモリバッファからロード
     int load(const unsigned char* paramBuffer, int paramLen,
              const unsigned char* modelBuffer, int modelLen);
-
-    // ファイルパスからロード
     int load(const std::string& paramPath, const std::string& modelPath);
 
-    // RGBA ピクセル入力 → RGBA ピクセル出力（呼び出し側で w*scale * h*scale * 4 確保）
+    // 入力: RGBA, 出力: RGBA
     int process(const unsigned char* inputPixels, int w, int h,
                 unsigned char* outputPixels);
 
-    int scale = 4;
-    int tileSize = 200;
-    int prepadding = 10;
-
     bool isLoaded() const { return loaded; }
+
+    int scale = 4;
+    int tileSize = 32;      // デフォルト32（安全重視）
+    int prepadding = 10;
 
 private:
     ncnn::Net net;
-    bool loaded = false;
+    bool loaded;
+    int gpuid;
+    bool useGpu;
 };
 
-#endif // REALESRGAN_SIMPLE_H
+#endif
