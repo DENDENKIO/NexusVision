@@ -3,27 +3,26 @@ package com.nexus.vision.ncnn
 
 import android.content.Context
 import android.graphics.Bitmap
+import android.graphics.Canvas
+import android.graphics.Rect
 import android.util.Log
 
 class NcnnSuperResolution {
     companion object {
         private const val TAG = "NcnnSR"
 
-        // 案A: 実写写真向け高品質モデルに変更
         private const val PARAM_FILE = "models/realesrgan-x4plus.param"
         private const val MODEL_FILE = "models/realesrgan-x4plus.bin"
         private const val SCALE = 4
-        private const val TILE_SIZE = 64  // x4plusはモデルが大きいためタイルを小さく
+        private const val TILE_SIZE = 64
 
-        // 戦略の閾値
-        private const val SR_4X_MAX_INPUT = 2048
-        private const val SR_2X_MAX_INPUT = 4096
-    }
+        // この閾値以下なら4×拡大、超えたら元サイズ維持で画質強調
+        private const val UPSCALE_THRESHOLD = 2048
 
-    enum class Strategy {
-        FULL_4X,
-        DOWNSCALE_THEN_4X,
-        ALREADY_HIGH_RES
+        // 画質強調モードのタイルサイズ（元画像上の切り出しサイズ）
+        private const val ENHANCE_TILE = 256
+        // タイル重なり（継ぎ目を目立たなくする）
+        private const val ENHANCE_OVERLAP = 16
     }
 
     private var initialized = false
@@ -35,8 +34,8 @@ class NcnnSuperResolution {
                 context.assets, PARAM_FILE, MODEL_FILE, SCALE, TILE_SIZE
             )
             initialized = result
-            if (result) Log.i(TAG, "x4plus model initialized successfully")
-            else Log.e(TAG, "x4plus model initialization failed")
+            if (result) Log.i(TAG, "x4plus model initialized")
+            else Log.e(TAG, "x4plus model init failed")
             result
         } catch (e: Exception) {
             Log.e(TAG, "Init error: ${e.message}")
@@ -44,46 +43,117 @@ class NcnnSuperResolution {
         }
     }
 
-    private fun determineStrategy(width: Int, height: Int): Strategy {
-        val maxSide = maxOf(width, height)
-        return when {
-            maxSide <= SR_4X_MAX_INPUT -> Strategy.FULL_4X
-            maxSide <= SR_2X_MAX_INPUT -> Strategy.DOWNSCALE_THEN_4X
-            else -> Strategy.ALREADY_HIGH_RES
-        }
-    }
-
+    /**
+     * メインの高画質化エントリポイント
+     * 小画像 → 4×拡大超解像
+     * 大画像 → 元サイズ維持の画質強調
+     */
     suspend fun upscale(bitmap: Bitmap): Bitmap? {
         if (!initialized || !RealEsrganBridge.nativeIsLoaded()) {
             Log.e(TAG, "Model not loaded")
             return null
         }
 
-        val strategy = determineStrategy(bitmap.width, bitmap.height)
-        Log.i(TAG, "Input: ${bitmap.width}x${bitmap.height}, strategy: $strategy")
+        val maxSide = maxOf(bitmap.width, bitmap.height)
 
-        return when (strategy) {
-            Strategy.ALREADY_HIGH_RES -> {
-                Log.i(TAG, "Image already high-res (${bitmap.width}x${bitmap.height}), skipping SR")
-                null
-            }
-            Strategy.FULL_4X -> {
-                processWithNcnn(bitmap)
-            }
-            Strategy.DOWNSCALE_THEN_4X -> {
-                val maxSide = maxOf(bitmap.width, bitmap.height)
-                val ratio = SR_4X_MAX_INPUT.toFloat() / maxSide
-                val newW = (bitmap.width * ratio).toInt()
-                val newH = (bitmap.height * ratio).toInt()
-                Log.i(TAG, "Downscaling: ${bitmap.width}x${bitmap.height} -> ${newW}x${newH} before 4x SR")
-                val downscaled = Bitmap.createScaledBitmap(bitmap, newW, newH, true)
-                val result = processWithNcnn(downscaled)
-                if (downscaled !== bitmap) downscaled.recycle()
-                result
-            }
+        return if (maxSide <= UPSCALE_THRESHOLD) {
+            Log.i(TAG, "Mode: 4x upscale (${bitmap.width}x${bitmap.height})")
+            processWithNcnn(bitmap)
+        } else {
+            Log.i(TAG, "Mode: enhance-in-place (${bitmap.width}x${bitmap.height})")
+            enhanceInPlace(bitmap)
         }
     }
 
+    /**
+     * 画質強調モード（案C）
+     * 元画像をタイル分割 → 各タイルを4×超解像 → 元のタイルサイズに縮小 → 合成
+     * 出力サイズ＝入力サイズ（拡大しない）
+     * 超解像→縮小を経ることでノイズ除去＋ディテール強調の効果を得る
+     */
+    private fun enhanceInPlace(bitmap: Bitmap): Bitmap? {
+        return try {
+            val w = bitmap.width
+            val h = bitmap.height
+            val startTime = System.currentTimeMillis()
+
+            // 入力を確実にARGB_8888にする
+            val source = if (bitmap.config != Bitmap.Config.ARGB_8888) {
+                bitmap.copy(Bitmap.Config.ARGB_8888, false)
+            } else {
+                bitmap
+            }
+
+            // 出力用Bitmap（元と同じサイズ）
+            val output = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
+            val canvas = Canvas(output)
+
+            val step = ENHANCE_TILE - ENHANCE_OVERLAP
+            val tilesX = (w + step - 1) / step
+            val tilesY = (h + step - 1) / step
+            val totalTiles = tilesX * tilesY
+            var processed = 0
+
+            Log.i(TAG, "Enhance: ${w}x${h}, tiles=${tilesX}x${tilesY} (${totalTiles} total), tile=${ENHANCE_TILE}px, overlap=${ENHANCE_OVERLAP}px")
+
+            for (ty in 0 until tilesY) {
+                for (tx in 0 until tilesX) {
+                    val srcLeft = (tx * step).coerceAtMost(w - 1)
+                    val srcTop = (ty * step).coerceAtMost(h - 1)
+                    val srcRight = (srcLeft + ENHANCE_TILE).coerceAtMost(w)
+                    val srcBottom = (srcTop + ENHANCE_TILE).coerceAtMost(h)
+                    val tileW = srcRight - srcLeft
+                    val tileH = srcBottom - srcTop
+
+                    if (tileW < 16 || tileH < 16) continue
+
+                    // タイル切り出し
+                    val tile = Bitmap.createBitmap(source, srcLeft, srcTop, tileW, tileH)
+
+                    // 4×超解像
+                    val srTile = RealEsrganBridge.nativeProcess(tile)
+                    tile.recycle()
+
+                    if (srTile != null) {
+                        // 超解像結果を元のタイルサイズに縮小
+                        val shrunk = Bitmap.createScaledBitmap(srTile, tileW, tileH, true)
+                        srTile.recycle()
+
+                        // 出力に書き込み
+                        val dstRect = Rect(srcLeft, srcTop, srcRight, srcBottom)
+                        canvas.drawBitmap(shrunk, null, dstRect, null)
+                        shrunk.recycle()
+                    } else {
+                        // 失敗時は元タイルをそのまま書き込み
+                        val fallback = Bitmap.createBitmap(source, srcLeft, srcTop, tileW, tileH)
+                        val dstRect = Rect(srcLeft, srcTop, srcRight, srcBottom)
+                        canvas.drawBitmap(fallback, null, dstRect, null)
+                        fallback.recycle()
+                        Log.w(TAG, "Tile ($tx,$ty) SR failed, using original")
+                    }
+
+                    processed++
+                    if (processed % 5 == 0 || processed == totalTiles) {
+                        val pct = (processed * 100.0 / totalTiles)
+                        Log.i(TAG, "Enhance progress: $processed/$totalTiles (${String.format("%.1f", pct)}%)")
+                    }
+                }
+            }
+
+            if (source !== bitmap) source.recycle()
+
+            val elapsed = System.currentTimeMillis() - startTime
+            Log.i(TAG, "Enhance done: ${w}x${h} in ${elapsed}ms ($totalTiles tiles)")
+            output
+        } catch (e: Exception) {
+            Log.e(TAG, "Enhance error: ${e.message}")
+            null
+        }
+    }
+
+    /**
+     * 通常の4×超解像（小画像用）
+     */
     private fun processWithNcnn(bitmap: Bitmap): Bitmap? {
         return try {
             val argbInput = if (bitmap.config != Bitmap.Config.ARGB_8888) {
@@ -91,12 +161,12 @@ class NcnnSuperResolution {
             } else {
                 bitmap
             }
-            Log.i(TAG, "Processing: ${argbInput.width}x${argbInput.height} -> expected ${argbInput.width * SCALE}x${argbInput.height * SCALE}")
+            Log.i(TAG, "4x SR: ${argbInput.width}x${argbInput.height} -> ${argbInput.width * SCALE}x${argbInput.height * SCALE}")
             val startTime = System.currentTimeMillis()
             val result = RealEsrganBridge.nativeProcess(argbInput)
             val elapsed = System.currentTimeMillis() - startTime
             if (result != null) {
-                Log.i(TAG, "Done: ${result.width}x${result.height} in ${elapsed}ms")
+                Log.i(TAG, "4x SR done: ${result.width}x${result.height} in ${elapsed}ms")
             } else {
                 Log.e(TAG, "nativeProcess returned null after ${elapsed}ms")
             }
@@ -108,6 +178,9 @@ class NcnnSuperResolution {
         }
     }
 
+    /**
+     * デジタルズーム（部分拡大＋超解像）
+     */
     suspend fun digitalZoom(
         bitmap: Bitmap,
         centerX: Float = 0.5f,
@@ -125,22 +198,12 @@ class NcnnSuperResolution {
             var top = ((centerY * bitmap.height) - roiHeight / 2).toInt()
             left = left.coerceIn(0, bitmap.width - roiWidth)
             top = top.coerceIn(0, bitmap.height - roiHeight)
-            Log.i(TAG, "Digital zoom: ROI=${left},${top} ${roiWidth}x${roiHeight} from ${bitmap.width}x${bitmap.height}")
+
+            Log.i(TAG, "Digital zoom: ROI=${left},${top} ${roiWidth}x${roiHeight}")
             val roi = Bitmap.createBitmap(bitmap, left, top, roiWidth, roiHeight)
-            val strategy = determineStrategy(roi.width, roi.height)
-            val result = when (strategy) {
-                Strategy.ALREADY_HIGH_RES, Strategy.DOWNSCALE_THEN_4X -> {
-                    val maxSide = maxOf(roi.width, roi.height)
-                    val ratio = SR_4X_MAX_INPUT.toFloat() / maxSide
-                    val downscaled = Bitmap.createScaledBitmap(
-                        roi, (roi.width * ratio).toInt(), (roi.height * ratio).toInt(), true
-                    )
-                    val sr = processWithNcnn(downscaled)
-                    downscaled.recycle()
-                    sr
-                }
-                Strategy.FULL_4X -> processWithNcnn(roi)
-            }
+
+            // ROIに対してupscale（サイズに応じて4×拡大 or 画質強調が自動選択）
+            val result = upscale(roi)
             if (roi !== bitmap) roi.recycle()
             result
         } catch (e: Exception) {

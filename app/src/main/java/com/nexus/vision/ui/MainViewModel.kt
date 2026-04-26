@@ -393,23 +393,6 @@ class MainViewModel : ViewModel() {
 
             val origW = originalBitmap.width
             val origH = originalBitmap.height
-            val maxSide = maxOf(origW, origH)
-
-            // 高解像度画像（長辺4096超）は超解像不要
-            if (maxSide > 4096) {
-                val savedUri = saveBitmapToGallery(originalBitmap, "HighRes")
-                val responseText = buildString {
-                    appendLine("ℹ️ この画像は既に高解像度です (${origW}×${origH})")
-                    appendLine("超解像処理は不要なため、元画像をそのまま保存しました。")
-                    appendLine()
-                    appendLine("💡 部分的に拡大したい場合は「ズーム」と送信してください。")
-                    if (savedUri != null) {
-                        appendLine("📁 Pictures/NexusVision/ に保存")
-                    }
-                }
-                originalBitmap.recycle()
-                return@withContext responseText
-            }
 
             // 安全なコピーを作成
             val safeCopy = originalBitmap.copy(Bitmap.Config.ARGB_8888, false)
@@ -419,14 +402,19 @@ class MainViewModel : ViewModel() {
                 return@withContext "⚠️ 画像のコピーに失敗しました"
             }
 
-            // 超解像実行
+            // 超解像実行（サイズに応じて4×拡大 or 画質強調が自動選択）
             val result = routeC?.process(safeCopy)
 
             if (result != null && result.success) {
                 val savedUri = saveBitmapToGallery(result.bitmap, "Enhanced")
+                val mode = if (result.bitmap.width == safeCopy.width && result.bitmap.height == safeCopy.height) {
+                    "画質強調" // 元サイズ維持
+                } else {
+                    "4×超解像" // 拡大
+                }
                 val responseText = buildString {
-                    appendLine("✅ 超解像完了 (${result.method})")
-                    appendLine("📐 ${safeCopy.width}×${safeCopy.height} → ${result.bitmap.width}×${result.bitmap.height}")
+                    appendLine("✅ ${mode}完了 (${result.method})")
+                    appendLine("📐 ${origW}×${origH} → ${result.bitmap.width}×${result.bitmap.height}")
                     appendLine("⏱ ${result.timeMs}ms")
                     if (savedUri != null) {
                         appendLine("📁 Pictures/NexusVision/ に保存")
@@ -441,7 +429,7 @@ class MainViewModel : ViewModel() {
                 val savedUri = saveBitmapToGallery(safeCopy, "Original")
                 safeCopy.recycle()
                 buildString {
-                    appendLine("⚠️ 超解像処理に失敗しました")
+                    appendLine("⚠️ 画質改善処理に失敗しました")
                     appendLine("元画像をそのまま保存しました (${origW}×${origH})")
                     if (savedUri != null) {
                         appendLine("📁 Pictures/NexusVision/ に保存済")
