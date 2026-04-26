@@ -278,3 +278,108 @@ int RealESRGANSimple::sharpen(const unsigned char* inputPixels, int w, int h,
     LOGI("Sharpen complete: %dx%d", w, h);
     return 0;
 }
+
+int RealESRGANSimple::guidedBlend(const unsigned char* guidePixels,
+                                    const unsigned char* enhancedPixels,
+                                    int w, int h,
+                                    unsigned char* outputPixels,
+                                    float aiWeight) {
+    LOGI("GuidedBlend: %dx%d, aiWeight=%.2f", w, h, aiWeight);
+
+    // ガイデッド超解像の原理:
+    // 1. guidePixels（元画像リサイズ版）から高周波成分（エッジ・テクスチャ）を抽出
+    // 2. enhancedPixels（AI処理結果）から低周波成分（滑らかな領域の改善）を取得
+    // 3. 合成: output = guide_highfreq + enhanced_lowfreq
+
+    size_t pixels = (size_t)w * h;
+
+    // Step 1: ぼかし版を作成（5x5ボックスブラー）
+    std::vector<float> guideBlurR(pixels);
+    std::vector<float> guideBlurG(pixels);
+    std::vector<float> guideBlurB(pixels);
+
+    std::vector<float> enhBlurR(pixels);
+    std::vector<float> enhBlurG(pixels);
+    std::vector<float> enhBlurB(pixels);
+
+    const int radius = 2;
+    for (int y = 0; y < h; y++) {
+        for (int x = 0; x < w; x++) {
+            float gSumR = 0, gSumG = 0, gSumB = 0;
+            float eSumR = 0, eSumG = 0, eSumB = 0;
+            int count = 0;
+            for (int dy = -radius; dy <= radius; dy++) {
+                for (int dx = -radius; dx <= radius; dx++) {
+                    int nx = x + dx;
+                    int ny = y + dy;
+                    if (nx >= 0 && nx < w && ny >= 0 && ny < h) {
+                        int idx = (ny * w + nx) * 4;
+                        gSumR += guidePixels[idx + 0];
+                        gSumG += guidePixels[idx + 1];
+                        gSumB += guidePixels[idx + 2];
+                        eSumR += enhancedPixels[idx + 0];
+                        eSumG += enhancedPixels[idx + 1];
+                        eSumB += enhancedPixels[idx + 2];
+                        count++;
+                    }
+                }
+            }
+            size_t pidx = y * w + x;
+            guideBlurR[pidx] = gSumR / count;
+            guideBlurG[pidx] = gSumG / count;
+            guideBlurB[pidx] = gSumB / count;
+            enhBlurR[pidx] = eSumR / count;
+            enhBlurG[pidx] = eSumG / count;
+            enhBlurB[pidx] = eSumB / count;
+        }
+    }
+
+    // Step 2: 合成
+    for (int y = 0; y < h; y++) {
+        for (int x = 0; x < w; x++) {
+            size_t pidx = y * w + x;
+            int idx = pidx * 4;
+
+            float gR = guidePixels[idx + 0];
+            float gG = guidePixels[idx + 1];
+            float gB = guidePixels[idx + 2];
+
+            float eR = enhancedPixels[idx + 0];
+            float eG = enhancedPixels[idx + 1];
+            float eB = enhancedPixels[idx + 2];
+
+            // 元画像のディテール（高周波）= 元 - ぼかし
+            float gDetailR = gR - guideBlurR[pidx];
+            float gDetailG = gG - guideBlurG[pidx];
+            float gDetailB = gB - guideBlurB[pidx];
+
+            // AI結果のベース（低周波）
+            float eBaseR = enhBlurR[pidx];
+            float eBaseG = enhBlurG[pidx];
+            float eBaseB = enhBlurB[pidx];
+
+            // 合成: AIベース + 元ディテール
+            float fusedR = eBaseR + gDetailR;
+            float fusedG = eBaseG + gDetailG;
+            float fusedB = eBaseB + gDetailB;
+
+            // さらにAI結果と直接ブレンド（aiWeightで調整）
+            float outR = fusedR * (1.0f - aiWeight) + eR * aiWeight;
+            float outG = fusedG * (1.0f - aiWeight) + eG * aiWeight;
+            float outB = fusedB * (1.0f - aiWeight) + eB * aiWeight;
+
+            // clamp
+            if (outR < 0) outR = 0; if (outR > 255) outR = 255;
+            if (outG < 0) outG = 0; if (outG > 255) outG = 255;
+            if (outB < 0) outB = 0; if (outB > 255) outB = 255;
+
+            outputPixels[idx + 0] = (unsigned char)(outR + 0.5f);
+            outputPixels[idx + 1] = (unsigned char)(outG + 0.5f);
+            outputPixels[idx + 2] = (unsigned char)(outB + 0.5f);
+            outputPixels[idx + 3] = guidePixels[idx + 3]; // alpha は元画像から
+        }
+    }
+
+    LOGI("GuidedBlend complete: %dx%d", w, h);
+    return 0;
+}

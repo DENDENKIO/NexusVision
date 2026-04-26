@@ -14,13 +14,23 @@ public:
              const unsigned char* modelBuffer, int modelLen);
     int load(const std::string& paramPath, const std::string& modelPath);
 
-    // 4×超解像: 入力RGBA → 出力RGBA（サイズ4倍）
     int process(const unsigned char* inputPixels, int w, int h,
                 unsigned char* outputPixels);
 
-    // アンシャープマスク: 入力RGBA → 出力RGBA（同サイズ、シャープ化のみ）
+    // アンシャープマスク
     static int sharpen(const unsigned char* inputPixels, int w, int h,
                        unsigned char* outputPixels, float strength);
+
+    // ラプラシアンピラミッド合成
+    // original: 元画像を出力サイズにリサイズしたもの（高周波ソース）
+    // enhanced: AI超解像結果（低周波ソース）
+    // 同サイズであること
+    static int laplacianBlend(const unsigned char* originalPixels,
+                              const unsigned char* enhancedPixels,
+                              int w, int h,
+                              unsigned char* outputPixels,
+                              float detailStrength,
+                              float sharpenStrength);
 
     bool isLoaded() const { return loaded; }
 

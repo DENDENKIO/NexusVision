@@ -20,8 +20,14 @@ object RealEsrganBridge {
 
     external fun nativeProcess(inputBitmap: Bitmap): Bitmap?
 
-    // シャープ化（同サイズ出力、超解像不要な大画像向け）
     external fun nativeSharpen(inputBitmap: Bitmap, strength: Float): Bitmap?
+
+    // ガイデッドブレンド: 元画像の構造 + AI結果を合成
+    external fun nativeGuidedBlend(
+        guideBitmap: Bitmap,
+        enhancedBitmap: Bitmap,
+        aiWeight: Float
+    ): Bitmap?
 
     external fun nativeRelease()
 

@@ -274,6 +274,99 @@ Java_com_nexus_vision_ncnn_RealEsrganBridge_nativeSharpen(
     return outBitmap;
 }
 
+JNIEXPORT jobject JNICALL
+Java_com_nexus_vision_ncnn_RealEsrganBridge_nativeGuidedBlend(
+    JNIEnv* env, jclass clazz,
+    jobject guideBitmap,
+    jobject enhancedBitmap,
+    jfloat aiWeight) {
+
+    AndroidBitmapInfo gInfo, eInfo;
+    AndroidBitmap_getInfo(env, guideBitmap, &gInfo);
+    AndroidBitmap_getInfo(env, enhancedBitmap, &eInfo);
+
+    if (gInfo.format != ANDROID_BITMAP_FORMAT_RGBA_8888 ||
+        eInfo.format != ANDROID_BITMAP_FORMAT_RGBA_8888) {
+        LOGE("GuidedBlend: unsupported format");
+        return nullptr;
+    }
+
+    int w = (int)gInfo.width;
+    int h = (int)gInfo.height;
+
+    // サイズが一致しない場合はエラー
+    if (w != (int)eInfo.width || h != (int)eInfo.height) {
+        LOGE("GuidedBlend: size mismatch guide=%dx%d enhanced=%dx%d",
+             w, h, (int)eInfo.width, (int)eInfo.height);
+        return nullptr;
+    }
+
+    LOGI("GuidedBlend: %dx%d, aiWeight=%.2f", w, h, (float)aiWeight);
+
+    // guide pixels
+    void* gPixels = nullptr;
+    AndroidBitmap_lockPixels(env, guideBitmap, &gPixels);
+    std::vector<unsigned char> guideData((size_t)w * h * 4);
+    for (int row = 0; row < h; row++) {
+        memcpy(guideData.data() + row * w * 4,
+               (unsigned char*)gPixels + row * gInfo.stride, w * 4);
+    }
+    AndroidBitmap_unlockPixels(env, guideBitmap);
+
+    // enhanced pixels
+    void* ePixels = nullptr;
+    AndroidBitmap_lockPixels(env, enhancedBitmap, &ePixels);
+    std::vector<unsigned char> enhData((size_t)w * h * 4);
+    for (int row = 0; row < h; row++) {
+        memcpy(enhData.data() + row * w * 4,
+               (unsigned char*)ePixels + row * eInfo.stride, w * 4);
+    }
+    AndroidBitmap_unlockPixels(env, enhancedBitmap);
+
+    // blend
+    std::vector<unsigned char> outputData((size_t)w * h * 4);
+    int ret = RealESRGANSimple::guidedBlend(
+        guideData.data(), enhData.data(), w, h, outputData.data(), (float)aiWeight);
+
+    guideData.clear(); guideData.shrink_to_fit();
+    enhData.clear(); enhData.shrink_to_fit();
+
+    if (ret != 0) {
+        LOGE("GuidedBlend failed: %d", ret);
+        return nullptr;
+    }
+
+    // output bitmap
+    jclass bitmapClass = env->FindClass("android/graphics/Bitmap");
+    jclass configClass = env->FindClass("android/graphics/Bitmap$Config");
+    jfieldID argb8888Field = env->GetStaticFieldID(configClass, "ARGB_8888",
+                                                     "Landroid/graphics/Bitmap$Config;");
+    jobject argb8888 = env->GetStaticObjectField(configClass, argb8888Field);
+    jmethodID createMethod = env->GetStaticMethodID(bitmapClass, "createBitmap",
+        "(IILandroid/graphics/Bitmap$Config;)Landroid/graphics/Bitmap;");
+    jobject outBitmap = env->CallStaticObjectMethod(bitmapClass, createMethod, w, h, argb8888);
+
+    if (env->ExceptionCheck()) {
+        env->ExceptionDescribe();
+        env->ExceptionClear();
+        return nullptr;
+    }
+    if (!outBitmap) return nullptr;
+
+    AndroidBitmapInfo outInfo;
+    AndroidBitmap_getInfo(env, outBitmap, &outInfo);
+    void* outPtr = nullptr;
+    AndroidBitmap_lockPixels(env, outBitmap, &outPtr);
+    for (int row = 0; row < h; row++) {
+        memcpy((unsigned char*)outPtr + row * outInfo.stride,
+               outputData.data() + row * w * 4, w * 4);
+    }
+    AndroidBitmap_unlockPixels(env, outBitmap);
+
+    LOGI("GuidedBlend output: %dx%d", w, h);
+    return outBitmap;
+}
+
 JNIEXPORT void JNICALL
 Java_com_nexus_vision_ncnn_RealEsrganBridge_nativeRelease(
     JNIEnv* env, jclass clazz) {
