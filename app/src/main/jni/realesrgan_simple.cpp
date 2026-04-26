@@ -4,6 +4,7 @@
 #include <cstring>
 #include <cmath>
 #include <android/log.h>
+#include "datareader.h"
 
 #define TAG "RealESRGAN"
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO, TAG, __VA_ARGS__)
@@ -25,20 +26,28 @@ RealESRGANSimple::~RealESRGANSimple() {
 
 int RealESRGANSimple::load(const unsigned char* paramBuffer, int paramLen,
                             const unsigned char* modelBuffer, int modelLen) {
-    int ret = net.load_param_mem(reinterpret_cast<const char*>(paramBuffer));
+    // param はテキスト形式 → null 終端が必要
+    std::vector<char> paramStr(paramLen + 1);
+    memcpy(paramStr.data(), paramBuffer, paramLen);
+    paramStr[paramLen] = '\0';
+
+    int ret = net.load_param_mem(paramStr.data());
     if (ret != 0) {
         LOGE("load_param_mem failed: %d", ret);
         return -1;
     }
+    LOGI("Param loaded, ret=%d", ret);
 
-    ret = net.load_model(modelBuffer);
+    // model はバイナリ形式 → DataReaderFromMemory を使用
+    ncnn::DataReaderFromMemory dr(reinterpret_cast<const char*>(modelBuffer));
+    ret = net.load_model(dr);
     if (ret != 0) {
         LOGE("load_model from memory failed: %d", ret);
         return -2;
     }
 
     loaded = true;
-    LOGI("Model loaded successfully from memory");
+    LOGI("Model loaded successfully from memory (param=%d bytes, model=%d bytes)", paramLen, modelLen);
     return 0;
 }
 
