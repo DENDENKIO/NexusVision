@@ -1,0 +1,124 @@
+{
+  "_note1": "KEEP THIS FILE! Check it into a version control system (VCS) like git.",
+  "_note2": "ObjectBox manages crucial IDs for your object model. See docs for details.",
+  "_note3": "If you have VCS merge conflicts, you must resolve them according to ObjectBox docs.",
+  "entities": [
+    {
+      "id": "1:2831074306211947005",
+      "lastPropertyId": "7:8965266342287777596",
+      "name": "InferenceCacheEntry",
+      "properties": [
+        {
+          "id": "1:7453393417153180152",
+          "name": "id",
+          "type": 6,
+          "flags": 1
+        },
+        {
+          "id": "2:7742485662087668456",
+          "name": "queryText",
+          "indexId": "1:2926761697782477246",
+          "type": 9,
+          "flags": 2048
+        },
+        {
+          "id": "3:4396130947402214164",
+          "name": "queryHash",
+          "indexId": "2:855470334614921598",
+          "type": 5,
+          "flags": 8
+        },
+        {
+          "id": "4:6846116139967432359",
+          "name": "responseText",
+          "type": 9
+        },
+        {
+          "id": "5:3020611708480903010",
+          "name": "createdAt",
+          "type": 6
+        },
+        {
+          "id": "6:3245874859152666289",
+          "name": "lastAccessedAt",
+          "type": 6
+        },
+        {
+          "id": "7:8965266342287777596",
+          "name": "accessCount",
+          "type": 5
+        }
+      ],
+      "relations": []
+    },
+    {
+      "id": "2:1141832672566538766",
+      "lastPropertyId": "9:6832646405626802484",
+      "name": "PHashCacheEntry",
+      "properties": [
+        {
+          "id": "1:2415370328883907430",
+          "name": "id",
+          "type": 6,
+          "flags": 1
+        },
+        {
+          "id": "2:5138878171387724946",
+          "name": "pHash",
+          "indexId": "3:6954712196211237713",
+          "type": 6,
+          "flags": 8
+        },
+        {
+          "id": "3:8557324953056229509",
+          "name": "resultText",
+          "type": 9
+        },
+        {
+          "id": "4:3994368350445752817",
+          "name": "category",
+          "indexId": "4:7684813132983160039",
+          "type": 9,
+          "flags": 2048
+        },
+        {
+          "id": "5:8254648186959596736",
+          "name": "entropy",
+          "type": 8
+        },
+        {
+          "id": "6:5993801389786079202",
+          "name": "fecsScore",
+          "type": 8
+        },
+        {
+          "id": "7:7682679221437284059",
+          "name": "createdAt",
+          "type": 6
+        },
+        {
+          "id": "8:2021073199231624163",
+          "name": "lastAccessedAt",
+          "type": 6
+        },
+        {
+          "id": "9:6832646405626802484",
+          "name": "accessCount",
+          "type": 5
+        }
+      ],
+      "relations": []
+    }
+  ],
+  "lastEntityId": "2:1141832672566538766",
+  "lastIndexId": "4:7684813132983160039",
+  "lastRelationId": "0:0",
+  "lastSequenceId": "0:0",
+  "modelVersion": 5,
+  "modelVersionParserMinimum": 5,
+  "retiredEntityUids": [],
+  "retiredIndexUids": [],
+  "retiredPropertyUids": [],
+  "retiredRelationUids": [],
+  "version": 1
+}

@@ -1,0 +1,5 @@
+<!-- ファイルパス: app/src/main/res/values/strings.xml -->
+
+<resources>
+    <string name="app_name">NEXUS Vision</string>
+</resources>

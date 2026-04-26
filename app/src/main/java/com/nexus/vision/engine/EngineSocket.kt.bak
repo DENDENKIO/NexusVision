@@ -1,0 +1,159 @@
+// ファイルパス: app/src/main/java/com/nexus/vision/engine/EngineSocket.kt
+
+package com.nexus.vision.engine
+
+import android.util.Log
+import com.google.ai.edge.litertlm.Backend
+import com.google.ai.edge.litertlm.Content
+import com.google.ai.edge.litertlm.Contents
+import com.google.ai.edge.litertlm.Conversation
+import com.google.ai.edge.litertlm.ConversationConfig
+import com.google.ai.edge.litertlm.Engine
+import com.google.ai.edge.litertlm.EngineConfig
+import com.google.ai.edge.litertlm.SamplerConfig
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.flowOn
+import kotlinx.coroutines.withContext
+
+/**
+ * LiteRT-LM エンジンのラッパー。
+ * Engine / Conversation の生成・破棄を管理し、推論メソッドを公開する。
+ *
+ * Phase 2: テキスト推論、画像+テキスト推論
+ * Phase 5: 100MP ダイレクトクロップ連携
+ * Phase 6: EASS パイプライン連携
+ */
+class EngineSocket {
+
+    companion object {
+        private const val TAG = "EngineSocket"
+    }
+
+    private var engine: Engine? = null
+    private var conversation: Conversation? = null
+
+    @Volatile
+    var isInitialized: Boolean = false
+        private set
+
+    /**
+     * エンジンを初期化する。
+     *
+     * @param modelPath .litertlm モデルファイルの絶対パス
+     * @param cacheDir  キャッシュディレクトリ（2回目以降の起動高速化）
+     * @param useGpu    GPU バックエンドを使用するか
+     */
+    suspend fun initialize(
+        modelPath: String,
+        cacheDir: String,
+        useGpu: Boolean = true
+    ) = withContext(Dispatchers.IO) {
+        Log.i(TAG, "Initializing engine — model=$modelPath, gpu=$useGpu")
+
+        val backend = if (useGpu) Backend.GPU() else Backend.CPU()
+
+        val engineConfig = EngineConfig(
+            modelPath = modelPath,
+            backend = backend,
+            visionBackend = if (useGpu) Backend.GPU() else null,
+            cacheDir = cacheDir
+        )
+
+        val newEngine = Engine(engineConfig)
+        newEngine.initialize()
+
+        engine = newEngine
+        isInitialized = true
+
+        Log.i(TAG, "Engine initialized successfully")
+    }
+
+    /**
+     * 新しい会話セッションを開始する。
+     * 既存の会話があればクローズしてから作成。
+     */
+    fun startConversation(
+        systemInstruction: String = "あなたは高性能なAIアシスタント「NEXUS Vision」です。日本語で簡潔かつ正確に回答してください。",
+        temperature: Double = 0.7,
+        topK: Int = 40,
+        topP: Double = 0.95
+    ) {
+        val eng = engine ?: throw IllegalStateException("Engine not initialized")
+
+        // 既存の会話をクローズ
+        conversation?.close()
+
+        val config = ConversationConfig(
+            systemInstruction = Contents.of(systemInstruction),
+            samplerConfig = SamplerConfig(
+                topK = topK,
+                topP = topP,
+                temperature = temperature
+            )
+        )
+
+        conversation = eng.createConversation(config)
+        Log.d(TAG, "New conversation started")
+    }
+
+    /**
+     * テキストメッセージを送信し、完全な応答を取得する（同期的）。
+     */
+    suspend fun sendTextMessage(text: String): String = withContext(Dispatchers.IO) {
+        val conv = conversation ?: throw IllegalStateException("No active conversation")
+        val response = conv.sendMessage(text)
+        response.toString()
+    }
+
+    /**
+     * テキストメッセージを送信し、ストリーミングで応答を取得する。
+     */
+    fun sendTextMessageStream(text: String): Flow<String> {
+        val conv = conversation ?: throw IllegalStateException("No active conversation")
+        return kotlinx.coroutines.flow.flow {
+            conv.sendMessageAsync(text).collect { message ->
+                emit(message.toString())
+            }
+        }.flowOn(Dispatchers.IO)
+    }
+
+    /**
+     * 画像+テキストメッセージを送信する（同期的）。
+     *
+     * @param imagePath 画像ファイルの絶対パス
+     * @param text      画像に対する質問テキスト
+     */
+    suspend fun sendImageMessage(imagePath: String, text: String): String =
+        withContext(Dispatchers.IO) {
+            val conv = conversation
+                ?: throw IllegalStateException("No active conversation")
+            val response = conv.sendMessage(
+                Contents.of(
+                    Content.ImageFile(imagePath),
+                    Content.Text(text)
+                )
+            )
+            response.toString()
+        }
+
+    /**
+     * 会話をクローズする。
+     */
+    fun closeConversation() {
+        conversation?.close()
+        conversation = null
+        Log.d(TAG, "Conversation closed")
+    }
+
+    /**
+     * エンジンを完全に解放する。
+     */
+    fun release() {
+        closeConversation()
+        engine?.close()
+        engine = null
+        isInitialized = false
+        Log.i(TAG, "Engine released")
+    }
+}
