@@ -380,47 +380,46 @@ class MainViewModel : ViewModel() {
     /**
      * RouteCProcessor で画像を超解像補正する。
      */
+    /**
+     * 高画質化処理
+     * 大画像 → 安全にサンプリングデコード（長辺2048以下）して超解像
+     * 小画像 → そのまま超解像
+     */
     private suspend fun processEnhanceRequest(uri: Uri): String =
         withContext(Dispatchers.IO) {
             val context = app.applicationContext
 
-            val inputStream = context.contentResolver.openInputStream(uri)
-                ?: throw IllegalStateException("画像を開けません")
-            val originalBitmap = BitmapFactory.decodeStream(inputStream)
-            inputStream.close()
+            // 元画像サイズを取得（メモリにロードしない）
+            val imgSize = com.nexus.vision.image.RegionDecoder.getImageSize(context, uri)
+                ?: return@withContext "⚠️ 画像サイズを取得できません"
+            val (origW, origH) = imgSize
 
-            if (originalBitmap == null) throw IllegalStateException("画像のデコードに失敗しました")
+            // 安全にデコード（長辺2048px以下にサンプリング）
+            val decoded = com.nexus.vision.image.RegionDecoder.decodeSafe(context, uri, 2048)
+                ?: return@withContext "⚠️ 画像のデコードに失敗しました"
 
-            val origW = originalBitmap.width
-            val origH = originalBitmap.height
-
-            // 安全なコピーを作成
-            val safeCopy = originalBitmap.copy(Bitmap.Config.ARGB_8888, false)
-            originalBitmap.recycle()
-
-            if (safeCopy == null) {
-                return@withContext "⚠️ 画像のコピーに失敗しました"
+            val safeCopy = if (decoded.config != Bitmap.Config.ARGB_8888) {
+                val copy = decoded.copy(Bitmap.Config.ARGB_8888, false)
+                decoded.recycle()
+                copy ?: return@withContext "⚠️ 画像のコピーに失敗しました"
+            } else {
+                decoded
             }
 
-            // 超解像実行（サイズに応じて4×拡大 or 画質強調が自動選択）
             val result = routeC?.process(safeCopy)
 
             if (result != null && result.success) {
                 val savedUri = saveBitmapToGallery(result.bitmap, "Enhanced")
-                val mode = if (result.bitmap.width == safeCopy.width && result.bitmap.height == safeCopy.height) {
-                    "画質強調" // 元サイズ維持
-                } else {
-                    "4×超解像" // 拡大
-                }
                 val responseText = buildString {
-                    appendLine("✅ ${mode}完了 (${result.method})")
-                    appendLine("📐 ${origW}×${origH} → ${result.bitmap.width}×${result.bitmap.height}")
+                    appendLine("✅ 超解像完了 (${result.method})")
+                    appendLine("📐 元画像: ${origW}×${origH}")
+                    appendLine("📐 処理: ${safeCopy.width}×${safeCopy.height} → ${result.bitmap.width}×${result.bitmap.height}")
                     appendLine("⏱ ${result.timeMs}ms")
                     if (savedUri != null) {
                         appendLine("📁 Pictures/NexusVision/ に保存")
-                    } else {
-                        appendLine("⚠️ 保存に失敗しました")
                     }
+                    appendLine()
+                    appendLine("💡 部分拡大は「ズーム」と送信してください")
                 }
                 safeCopy.recycle()
                 result.bitmap.recycle()
@@ -429,46 +428,61 @@ class MainViewModel : ViewModel() {
                 val savedUri = saveBitmapToGallery(safeCopy, "Original")
                 safeCopy.recycle()
                 buildString {
-                    appendLine("⚠️ 画質改善処理に失敗しました")
-                    appendLine("元画像をそのまま保存しました (${origW}×${origH})")
-                    if (savedUri != null) {
-                        appendLine("📁 Pictures/NexusVision/ に保存済")
-                    }
+                    appendLine("⚠️ 超解像処理に失敗しました")
+                    appendLine("元画像をそのまま保存しました")
+                    if (savedUri != null) appendLine("📁 Pictures/NexusVision/ に保存済")
                 }
             }
         }
 
     /**
-     * RouteCProcessor でデジタルズーム（部分拡大＋超解像）を実行する。
+     * デジタルズーム処理
+     * 画像のプレビューを表示 → ユーザーが範囲選択 → 選択領域だけデコード → 超解像
+     * （暫定版：中央50%をROIとして処理。UI連携は次フェーズ）
      */
     private suspend fun processZoomRequest(uri: Uri): String =
         withContext(Dispatchers.IO) {
             val context = app.applicationContext
-            val inputStream = context.contentResolver.openInputStream(uri)
-                ?: throw IllegalStateException("画像を開けません")
-            val originalBitmap = BitmapFactory.decodeStream(inputStream)
-            inputStream.close()
-            if (originalBitmap == null) throw IllegalStateException("画像のデコードに失敗しました")
 
-            // 中央を 3.0倍にズーム
-            val result = routeC?.digitalZoom(originalBitmap, 0.5f, 0.5f, 3.0f)
+            val imgSize = com.nexus.vision.image.RegionDecoder.getImageSize(context, uri)
+                ?: return@withContext "⚠️ 画像サイズを取得できません"
+            val (origW, origH) = imgSize
+
+            // 中央50%をROIとしてデコード（長辺2048以下）
+            val regionBitmap = com.nexus.vision.image.RegionDecoder.decodeRegion(
+                context, uri,
+                left = 0.25f, top = 0.25f, right = 0.75f, bottom = 0.75f,
+                maxOutputSide = 2048
+            ) ?: return@withContext "⚠️ 領域のデコードに失敗しました"
+
+            val safeCopy = if (regionBitmap.config != Bitmap.Config.ARGB_8888) {
+                val copy = regionBitmap.copy(Bitmap.Config.ARGB_8888, false)
+                regionBitmap.recycle()
+                copy ?: return@withContext "⚠️ コピーに失敗しました"
+            } else {
+                regionBitmap
+            }
+
+            val result = routeC?.process(safeCopy)
 
             if (result != null && result.success) {
                 val savedUri = saveBitmapToGallery(result.bitmap, "Zoom")
                 val responseText = buildString {
                     appendLine("✅ デジタルズーム完了 (${result.method})")
-                    appendLine("📐 ${originalBitmap.width}x${originalBitmap.height} -> ROI -> ${result.bitmap.width}x${result.bitmap.height}")
-                    appendLine("⏱ ${result.elapsedMs}ms")
+                    appendLine("📐 元画像: ${origW}×${origH}")
+                    appendLine("📐 ROI: 中央50% → ${safeCopy.width}×${safeCopy.height}")
+                    appendLine("📐 出力: ${result.bitmap.width}×${result.bitmap.height}")
+                    appendLine("⏱ ${result.timeMs}ms")
                     if (savedUri != null) {
                         appendLine("📁 Pictures/NexusVision/ に保存")
                     }
                 }
+                safeCopy.recycle()
                 result.bitmap.recycle()
-                originalBitmap.recycle()
                 responseText
             } else {
-                originalBitmap.recycle()
-                "⚠️ デジタルズームに失敗しました。"
+                safeCopy.recycle()
+                "⚠️ デジタルズームに失敗しました"
             }
         }
 
