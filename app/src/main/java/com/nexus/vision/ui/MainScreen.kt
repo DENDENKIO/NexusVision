@@ -35,12 +35,8 @@ import androidx.compose.ui.unit.dp
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.nexus.vision.ui.components.ChatBubble
 import com.nexus.vision.ui.components.ChatInput
+import com.nexus.vision.ui.components.CropSelector
 
-/**
- * NEXUS Vision メイン画面
- *
- * Phase 4 修正: ナビゲーションバー余白対応、画像選択コールバック
- */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun MainScreen(
@@ -51,14 +47,12 @@ fun MainScreen(
     val uiState by viewModel.uiState.collectAsState()
     val listState = rememberLazyListState()
 
-    // Activity の画像選択結果を ViewModel に接続
     LaunchedEffect(Unit) {
         onImageSelected { uri ->
             viewModel.setSelectedImage(uri)
         }
     }
 
-    // 新しいメッセージが追加されたら自動スクロール
     LaunchedEffect(uiState.messages.size) {
         if (uiState.messages.isNotEmpty()) {
             listState.animateScrollToItem(uiState.messages.size - 1)
@@ -84,7 +78,6 @@ fun MainScreen(
                 )
             )
         },
-        // Scaffold に contentWindowInsets を指定してナビバー重なりを防ぐ
         contentWindowInsets = WindowInsets(0),
         bottomBar = {
             Column(
@@ -92,16 +85,29 @@ fun MainScreen(
                     .windowInsetsPadding(WindowInsets.navigationBars)
             ) {
                 HorizontalDivider()
-                ChatInput(
-                    text = uiState.inputText,
-                    onTextChange = { viewModel.updateInputText(it) },
-                    selectedImageUri = uiState.selectedImageUri,
-                    onPickImage = onPickImage,
-                    onClearImage = { viewModel.clearSelectedImage() },
-                    onSend = { viewModel.sendMessage() },
-                    // 修正: 処理中のみ無効化（エンジン未ロードでも入力可能に）
-                    isEnabled = !uiState.isProcessing
-                )
+
+                // 範囲選択モード中はクロップUIを表示
+                if (uiState.cropMode && uiState.cropThumbnail != null) {
+                    CropSelector(
+                        thumbnail = uiState.cropThumbnail!!,
+                        imageWidth = uiState.cropImageWidth,
+                        imageHeight = uiState.cropImageHeight,
+                        onConfirm = { left, top, right, bottom ->
+                            viewModel.onCropConfirmed(left, top, right, bottom)
+                        },
+                        onCancel = { viewModel.cancelCropMode() }
+                    )
+                } else {
+                    ChatInput(
+                        text = uiState.inputText,
+                        onTextChange = { viewModel.updateInputText(it) },
+                        selectedImageUri = uiState.selectedImageUri,
+                        onPickImage = onPickImage,
+                        onClearImage = { viewModel.clearSelectedImage() },
+                        onSend = { viewModel.sendMessage() },
+                        isEnabled = !uiState.isProcessing
+                    )
+                }
             }
         }
     ) { innerPadding ->
@@ -110,7 +116,6 @@ fun MainScreen(
                 .fillMaxSize()
                 .padding(innerPadding)
         ) {
-            // エンジン未ロード時のバナー
             if (!uiState.isEngineReady && !uiState.isProcessing) {
                 EngineLoadBanner(
                     statusMessage = uiState.statusMessage,
@@ -118,7 +123,6 @@ fun MainScreen(
                 )
             }
 
-            // チャットメッセージ一覧
             LazyColumn(
                 state = listState,
                 modifier = Modifier

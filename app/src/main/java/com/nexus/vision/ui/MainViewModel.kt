@@ -22,6 +22,7 @@ import com.nexus.vision.engine.NexusEngineManager
 import com.nexus.vision.engine.ThermalLevel
 import com.nexus.vision.image.DocumentSharpener
 import com.nexus.vision.image.DirectCrop100MP
+import com.nexus.vision.image.RegionDecoder
 import com.nexus.vision.ocr.MlKitOcrEngine
 import com.nexus.vision.ui.components.ChatMessage
 import com.nexus.vision.pipeline.RouteCProcessor
@@ -50,7 +51,13 @@ data class MainUiState(
     val messages: List<ChatMessage> = emptyList(),
     val inputText: String = "",
     val selectedImageUri: Uri? = null,
-    val selectedImagePath: String? = null
+    val selectedImagePath: String? = null,
+    // 範囲選択モード
+    val cropMode: Boolean = false,
+    val cropImageUri: Uri? = null,
+    val cropThumbnail: Bitmap? = null,
+    val cropImageWidth: Int = 0,
+    val cropImageHeight: Int = 0
 )
 
 class MainViewModel : ViewModel() {
@@ -64,10 +71,8 @@ class MainViewModel : ViewModel() {
     private val l1Cache: L1PHashCache = app.l1Cache
     private val l2Cache: L2InferenceCache = app.l2Cache
 
-    // Phase 5 追加: OCR エンジン
     private val ocrEngine = MlKitOcrEngine()
 
-    // Phase 7 完全修正版: Route C 処理（NCNN 超解像）
     private var routeC: RouteCProcessor? = null
     private var routeCInitialized = false
 
@@ -109,12 +114,9 @@ class MainViewModel : ViewModel() {
         }
 
         addSystemMessage("NEXUS Vision へようこそ。エンジンをロードしてからメッセージを送信してください。")
-
-        // Phase 7: 超解像エンジンの初期化
         initSuperResolution()
     }
 
-    // Phase 7 完全修正版: 超解像初期化
     private fun initSuperResolution() {
         viewModelScope.launch(Dispatchers.IO) {
             routeC = RouteCProcessor(app.applicationContext)
@@ -127,8 +129,6 @@ class MainViewModel : ViewModel() {
         }
     }
 
-    // Phase 5 追加: ViewModel 破棄時に OCR エンジンを解放
-    // Phase 7 追加: NCNN SR リソース解放
     override fun onCleared() {
         super.onCleared()
         ocrEngine.close()
@@ -167,6 +167,62 @@ class MainViewModel : ViewModel() {
         )
     }
 
+    // ── 範囲選択モード ──
+
+    /** 範囲選択をキャンセル */
+    fun cancelCropMode() {
+        _uiState.value = _uiState.value.copy(
+            cropMode = false,
+            cropImageUri = null,
+            cropThumbnail = null,
+            cropImageWidth = 0,
+            cropImageHeight = 0
+        )
+    }
+
+    /** ユーザーが範囲を確定した */
+    fun onCropConfirmed(left: Float, top: Float, right: Float, bottom: Float) {
+        val uri = _uiState.value.cropImageUri ?: return
+        val imgW = _uiState.value.cropImageWidth
+        val imgH = _uiState.value.cropImageHeight
+
+        // 範囲選択モードを終了
+        _uiState.value = _uiState.value.copy(
+            cropMode = false,
+            cropThumbnail = null
+        )
+
+        // ユーザーメッセージ
+        val pxLeft = (left * imgW).toInt()
+        val pxTop = (top * imgH).toInt()
+        val pxRight = (right * imgW).toInt()
+        val pxBottom = (bottom * imgH).toInt()
+        addMessage(
+            ChatMessage(
+                role = ChatMessage.Role.USER,
+                text = "選択範囲をズーム: (${pxLeft},${pxTop})-(${pxRight},${pxBottom})"
+            )
+        )
+
+        val processingId = addProcessingMessage("選択範囲を超解像中...")
+
+        viewModelScope.launch {
+            try {
+                val response = processRegionZoom(uri, left, top, right, bottom, imgW, imgH)
+                replaceMessage(
+                    processingId,
+                    ChatMessage(id = processingId, role = ChatMessage.Role.ASSISTANT, text = response)
+                )
+            } catch (e: Exception) {
+                Log.e(TAG, "Region zoom failed", e)
+                replaceMessage(
+                    processingId,
+                    ChatMessage(id = processingId, role = ChatMessage.Role.ASSISTANT, text = "エラーが発生しました: ${e.message}")
+                )
+            }
+        }
+    }
+
     // ── メッセージ送信 ──
 
     fun sendMessage() {
@@ -191,7 +247,6 @@ class MainViewModel : ViewModel() {
             selectedImagePath = null
         )
 
-        // OCR 指示を検出
         val isOcrRequest = imageUri != null && (
                 text.contains("読み取", ignoreCase = true) ||
                 text.contains("テキスト", ignoreCase = true) ||
@@ -200,7 +255,6 @@ class MainViewModel : ViewModel() {
                 text.isBlank()
         )
 
-        // Phase 6 追加: 超解像・ズーム指示を検出
         val isEnhanceRequest = imageUri != null && (
                 text.contains("鮮明", ignoreCase = true) ||
                 text.contains("高画質", ignoreCase = true) ||
@@ -227,9 +281,14 @@ class MainViewModel : ViewModel() {
             return
         }
 
+        // ズーム要求 → 範囲選択モードに入る
+        if (isZoomRequest) {
+            enterCropMode(imageUri!!)
+            return
+        }
+
         val processingLabel = when {
             isOcrRequest -> "テキスト読み取り中..."
-            isZoomRequest -> "デジタルズーム処理中..."
             isEnhanceRequest -> "超解像処理中..."
             imageUri != null -> "画像を分析中..."
             else -> "考え中..."
@@ -241,7 +300,6 @@ class MainViewModel : ViewModel() {
             try {
                 val response = when {
                     isOcrRequest -> processOcrRequest(imageUri!!)
-                    isZoomRequest -> processZoomRequest(imageUri!!)
                     isEnhanceRequest -> processEnhanceRequest(imageUri!!)
                     imageUri != null -> processImageMessage(imageUri, displayText)
                     else -> processTextMessage(displayText)
@@ -249,23 +307,94 @@ class MainViewModel : ViewModel() {
 
                 replaceMessage(
                     processingId,
-                    ChatMessage(
-                        id = processingId,
-                        role = ChatMessage.Role.ASSISTANT,
-                        text = response
-                    )
+                    ChatMessage(id = processingId, role = ChatMessage.Role.ASSISTANT, text = response)
                 )
             } catch (e: Exception) {
                 Log.e(TAG, "Message processing failed", e)
                 replaceMessage(
                     processingId,
-                    ChatMessage(
-                        id = processingId,
-                        role = ChatMessage.Role.ASSISTANT,
-                        text = "エラーが発生しました: ${e.message}"
-                    )
+                    ChatMessage(id = processingId, role = ChatMessage.Role.ASSISTANT, text = "エラーが発生しました: ${e.message}")
                 )
             }
+        }
+    }
+
+    /** ズーム要求時に範囲選択モードに入る */
+    private fun enterCropMode(uri: Uri) {
+        viewModelScope.launch(Dispatchers.IO) {
+            val context = app.applicationContext
+            val imgSize = RegionDecoder.getImageSize(context, uri)
+            val thumbnail = RegionDecoder.decodeThumbnail(context, uri, 800)
+
+            if (imgSize == null || thumbnail == null) {
+                addMessage(
+                    ChatMessage(
+                        role = ChatMessage.Role.ASSISTANT,
+                        text = "⚠️ 画像を読み込めませんでした"
+                    )
+                )
+                return@launch
+            }
+
+            val (w, h) = imgSize
+            addMessage(
+                ChatMessage(
+                    role = ChatMessage.Role.ASSISTANT,
+                    text = "画像上で拡大したい範囲をドラッグで選択してください (${w}×${h})"
+                )
+            )
+
+            _uiState.value = _uiState.value.copy(
+                cropMode = true,
+                cropImageUri = uri,
+                cropThumbnail = thumbnail,
+                cropImageWidth = w,
+                cropImageHeight = h
+            )
+        }
+    }
+
+    // ── 選択領域ズーム処理 ──
+
+    private suspend fun processRegionZoom(
+        uri: Uri,
+        left: Float, top: Float, right: Float, bottom: Float,
+        imgW: Int, imgH: Int
+    ): String = withContext(Dispatchers.IO) {
+        val context = app.applicationContext
+
+        val regionBitmap = RegionDecoder.decodeRegion(
+            context, uri, left, top, right, bottom, maxOutputSide = 2048
+        ) ?: return@withContext "⚠️ 選択領域のデコードに失敗しました"
+
+        val safeCopy = if (regionBitmap.config != Bitmap.Config.ARGB_8888) {
+            val copy = regionBitmap.copy(Bitmap.Config.ARGB_8888, false)
+            regionBitmap.recycle()
+            copy ?: return@withContext "⚠️ コピーに失敗しました"
+        } else {
+            regionBitmap
+        }
+
+        val result = routeC?.process(safeCopy)
+
+        if (result != null && result.success) {
+            val savedUri = saveBitmapToGallery(result.bitmap, "Zoom")
+            val responseText = buildString {
+                appendLine("✅ デジタルズーム完了 (${result.method})")
+                appendLine("📐 元画像: ${imgW}×${imgH}")
+                appendLine("📐 選択領域: ${safeCopy.width}×${safeCopy.height}")
+                appendLine("📐 出力: ${result.bitmap.width}×${result.bitmap.height}")
+                appendLine("⏱ ${result.timeMs}ms")
+                if (savedUri != null) {
+                    appendLine("📁 Pictures/NexusVision/ に保存")
+                }
+            }
+            safeCopy.recycle()
+            result.bitmap.recycle()
+            responseText
+        } else {
+            safeCopy.recycle()
+            "⚠️ 選択範囲の超解像に失敗しました"
         }
     }
 
@@ -328,17 +457,12 @@ class MainViewModel : ViewModel() {
             response
         }
 
-    // ── Phase 5 追加: OCR 処理 ──
+    // ── OCR 処理 ──
 
-    /**
-     * 画像から文字を読み取る。
-     * DocumentSharpener で CaseA / CaseB を自動判定。
-     */
     private suspend fun processOcrRequest(uri: Uri): String =
         withContext(Dispatchers.IO) {
             val context = app.applicationContext
 
-            // 画像サイズを取得
             val sizeStream = context.contentResolver.openInputStream(uri)
                 ?: throw IllegalStateException("画像を開けません")
             val (width, height) = DirectCrop100MP.getImageDimensions(sizeStream)
@@ -375,27 +499,17 @@ class MainViewModel : ViewModel() {
             }
         }
 
-    // ── Phase 6 追加: EASS 超解像処理 ──
+    // ── 超解像処理 ──
 
-    /**
-     * RouteCProcessor で画像を超解像補正する。
-     */
-    /**
-     * 高画質化処理
-     * 大画像 → 安全にサンプリングデコード（長辺2048以下）して超解像
-     * 小画像 → そのまま超解像
-     */
     private suspend fun processEnhanceRequest(uri: Uri): String =
         withContext(Dispatchers.IO) {
             val context = app.applicationContext
 
-            // 元画像サイズを取得（メモリにロードしない）
-            val imgSize = com.nexus.vision.image.RegionDecoder.getImageSize(context, uri)
+            val imgSize = RegionDecoder.getImageSize(context, uri)
                 ?: return@withContext "⚠️ 画像サイズを取得できません"
             val (origW, origH) = imgSize
 
-            // 安全にデコード（長辺2048px以下にサンプリング）
-            val decoded = com.nexus.vision.image.RegionDecoder.decodeSafe(context, uri, 2048)
+            val decoded = RegionDecoder.decodeSafe(context, uri, 2048)
                 ?: return@withContext "⚠️ 画像のデコードに失敗しました"
 
             val safeCopy = if (decoded.config != Bitmap.Config.ARGB_8888) {
@@ -435,68 +549,11 @@ class MainViewModel : ViewModel() {
             }
         }
 
-    /**
-     * デジタルズーム処理
-     * 画像のプレビューを表示 → ユーザーが範囲選択 → 選択領域だけデコード → 超解像
-     * （暫定版：中央50%をROIとして処理。UI連携は次フェーズ）
-     */
-    private suspend fun processZoomRequest(uri: Uri): String =
-        withContext(Dispatchers.IO) {
-            val context = app.applicationContext
-
-            val imgSize = com.nexus.vision.image.RegionDecoder.getImageSize(context, uri)
-                ?: return@withContext "⚠️ 画像サイズを取得できません"
-            val (origW, origH) = imgSize
-
-            // 中央50%をROIとしてデコード（長辺2048以下）
-            val regionBitmap = com.nexus.vision.image.RegionDecoder.decodeRegion(
-                context, uri,
-                left = 0.25f, top = 0.25f, right = 0.75f, bottom = 0.75f,
-                maxOutputSide = 2048
-            ) ?: return@withContext "⚠️ 領域のデコードに失敗しました"
-
-            val safeCopy = if (regionBitmap.config != Bitmap.Config.ARGB_8888) {
-                val copy = regionBitmap.copy(Bitmap.Config.ARGB_8888, false)
-                regionBitmap.recycle()
-                copy ?: return@withContext "⚠️ コピーに失敗しました"
-            } else {
-                regionBitmap
-            }
-
-            val result = routeC?.process(safeCopy)
-
-            if (result != null && result.success) {
-                val savedUri = saveBitmapToGallery(result.bitmap, "Zoom")
-                val responseText = buildString {
-                    appendLine("✅ デジタルズーム完了 (${result.method})")
-                    appendLine("📐 元画像: ${origW}×${origH}")
-                    appendLine("📐 ROI: 中央50% → ${safeCopy.width}×${safeCopy.height}")
-                    appendLine("📐 出力: ${result.bitmap.width}×${result.bitmap.height}")
-                    appendLine("⏱ ${result.timeMs}ms")
-                    if (savedUri != null) {
-                        appendLine("📁 Pictures/NexusVision/ に保存")
-                    }
-                }
-                safeCopy.recycle()
-                result.bitmap.recycle()
-                responseText
-            } else {
-                safeCopy.recycle()
-                "⚠️ デジタルズームに失敗しました"
-            }
-        }
-
     // ── ヘルパー ──
 
-    /**
-     * 処理済み画像をギャラリーに保存する。
-     * Pictures/NexusVision/ フォルダに JPEG で保存される。
-     * 保存後はギャラリーアプリから閲覧可能。
-     */
     private fun saveBitmapToGallery(bitmap: Bitmap, prefix: String = "NEXUS"): Uri? {
         val context = app.applicationContext
-        val timestamp = java.text.SimpleDateFormat("yyyyMMdd_HHmmss", java.util.Locale.US)
-            .format(java.util.Date())
+        val timestamp = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date())
         val filename = "${prefix}_${timestamp}.jpg"
 
         val contentValues = ContentValues().apply {
@@ -514,11 +571,9 @@ class MainViewModel : ViewModel() {
                 resolver.openOutputStream(uri)?.use { outputStream ->
                     bitmap.compress(Bitmap.CompressFormat.JPEG, 95, outputStream)
                 }
-                // 書き込み完了 → 公開
                 contentValues.clear()
                 contentValues.put(MediaStore.Images.Media.IS_PENDING, 0)
                 resolver.update(uri, contentValues, null, null)
-
                 Log.i(TAG, "Saved to gallery: $filename (uri=$uri)")
                 return uri
             } catch (e: IOException) {
