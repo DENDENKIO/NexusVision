@@ -200,7 +200,7 @@ class MainViewModel : ViewModel() {
                 text.isBlank()
         )
 
-        // Phase 6 追加: 超解像指示を検出
+        // Phase 6 追加: 超解像・ズーム指示を検出
         val isEnhanceRequest = imageUri != null && (
                 text.contains("鮮明", ignoreCase = true) ||
                 text.contains("高画質", ignoreCase = true) ||
@@ -208,8 +208,13 @@ class MainViewModel : ViewModel() {
                 text.contains("enhance", ignoreCase = true) ||
                 text.contains("きれい", ignoreCase = true)
         )
+        val isZoomRequest = imageUri != null && (
+                text.contains("ズーム", ignoreCase = true) ||
+                text.contains("拡大", ignoreCase = true) ||
+                text.contains("zoom", ignoreCase = true)
+        )
 
-        val needsEngine = !isOcrRequest && !isEnhanceRequest
+        val needsEngine = !isOcrRequest && !isEnhanceRequest && !isZoomRequest
 
         if (needsEngine && !_uiState.value.isEngineReady) {
             addMessage(
@@ -224,7 +229,8 @@ class MainViewModel : ViewModel() {
 
         val processingLabel = when {
             isOcrRequest -> "テキスト読み取り中..."
-            isEnhanceRequest -> "EASS 超解像処理中..."
+            isZoomRequest -> "デジタルズーム処理中..."
+            isEnhanceRequest -> "超解像処理中..."
             imageUri != null -> "画像を分析中..."
             else -> "考え中..."
         }
@@ -235,7 +241,7 @@ class MainViewModel : ViewModel() {
             try {
                 val response = when {
                     isOcrRequest -> processOcrRequest(imageUri!!)
-                    // Phase 6 追加
+                    isZoomRequest -> processZoomRequest(imageUri!!)
                     isEnhanceRequest -> processEnhanceRequest(imageUri!!)
                     imageUri != null -> processImageMessage(imageUri, displayText)
                     else -> processTextMessage(displayText)
@@ -430,6 +436,40 @@ class MainViewModel : ViewModel() {
                         appendLine("📁 Pictures/NexusVision/ に保存済")
                     }
                 }
+            }
+        }
+
+    /**
+     * RouteCProcessor でデジタルズーム（部分拡大＋超解像）を実行する。
+     */
+    private suspend fun processZoomRequest(uri: Uri): String =
+        withContext(Dispatchers.IO) {
+            val context = app.applicationContext
+            val inputStream = context.contentResolver.openInputStream(uri)
+                ?: throw IllegalStateException("画像を開けません")
+            val originalBitmap = BitmapFactory.decodeStream(inputStream)
+            inputStream.close()
+            if (originalBitmap == null) throw IllegalStateException("画像のデコードに失敗しました")
+
+            // 中央を 3.0倍にズーム
+            val result = routeC?.digitalZoom(originalBitmap, 0.5f, 0.5f, 3.0f)
+
+            if (result != null && result.success) {
+                val savedUri = saveBitmapToGallery(result.bitmap, "Zoom")
+                val responseText = buildString {
+                    appendLine("✅ デジタルズーム完了 (${result.method})")
+                    appendLine("📐 ${originalBitmap.width}x${originalBitmap.height} -> ROI -> ${result.bitmap.width}x${result.bitmap.height}")
+                    appendLine("⏱ ${result.elapsedMs}ms")
+                    if (savedUri != null) {
+                        appendLine("📁 Pictures/NexusVision/ に保存")
+                    }
+                }
+                result.bitmap.recycle()
+                originalBitmap.recycle()
+                responseText
+            } else {
+                originalBitmap.recycle()
+                "⚠️ デジタルズームに失敗しました。"
             }
         }
 
