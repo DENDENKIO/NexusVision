@@ -1,17 +1,18 @@
 // ファイルパス: app/src/main/java/com/nexus/vision/pipeline/RouteCProcessor.kt
 package com.nexus.vision.pipeline
 
+import android.content.Context
 import android.graphics.Bitmap
 import android.util.Log
 
-class RouteCProcessor {
+class RouteCProcessor(private val context: Context) {
     companion object {
         private const val TAG = "RouteCProcessor"
     }
 
     private var sr: com.nexus.vision.ncnn.NcnnSuperResolution? = null
 
-    fun initialize(context: android.content.Context): Boolean {
+    fun initialize(): Boolean {
         sr = com.nexus.vision.ncnn.NcnnSuperResolution()
         return sr?.initialize(context) ?: false
     }
@@ -61,5 +62,8 @@ class RouteCProcessor {
         val method: String,
         val elapsedMs: Long,
         val success: Boolean
-    )
+    ) {
+        /** MainViewModel が result.timeMs で参照しているため互換プロパティを追加 */
+        val timeMs: Long get() = elapsedMs
+    }
 }
