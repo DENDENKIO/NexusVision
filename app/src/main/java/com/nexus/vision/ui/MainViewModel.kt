@@ -41,6 +41,12 @@ import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 
+/** 範囲選択の目的 */
+enum class CropPurpose {
+    ENHANCE,  // 高画質化
+    ZOOM      // ズーム（拡大）
+}
+
 data class MainUiState(
     val isEngineReady: Boolean = false,
     val isProcessing: Boolean = false,
@@ -54,6 +60,7 @@ data class MainUiState(
     val selectedImagePath: String? = null,
     // 範囲選択モード
     val cropMode: Boolean = false,
+    val cropPurpose: CropPurpose = CropPurpose.ENHANCE,
     val cropImageUri: Uri? = null,
     val cropThumbnail: Bitmap? = null,
     val cropImageWidth: Int = 0,
@@ -173,6 +180,7 @@ class MainViewModel : ViewModel() {
     fun cancelCropMode() {
         _uiState.value = _uiState.value.copy(
             cropMode = false,
+            cropPurpose = CropPurpose.ENHANCE,
             cropImageUri = null,
             cropThumbnail = null,
             cropImageWidth = 0,
@@ -185,6 +193,7 @@ class MainViewModel : ViewModel() {
         val uri = _uiState.value.cropImageUri ?: return
         val imgW = _uiState.value.cropImageWidth
         val imgH = _uiState.value.cropImageHeight
+        val purpose = _uiState.value.cropPurpose
 
         // 範囲選択モードを終了
         _uiState.value = _uiState.value.copy(
@@ -197,18 +206,28 @@ class MainViewModel : ViewModel() {
         val pxTop = (top * imgH).toInt()
         val pxRight = (right * imgW).toInt()
         val pxBottom = (bottom * imgH).toInt()
+
+        val actionLabel = when (purpose) {
+            CropPurpose.ENHANCE -> "選択範囲を高画質化"
+            CropPurpose.ZOOM -> "選択範囲をズーム"
+        }
+
         addMessage(
             ChatMessage(
                 role = ChatMessage.Role.USER,
-                text = "選択範囲をズーム: (${pxLeft},${pxTop})-(${pxRight},${pxBottom})"
+                text = "${actionLabel}: (${pxLeft},${pxTop})-(${pxRight},${pxBottom})"
             )
         )
 
-        val processingId = addProcessingMessage("選択範囲を超解像中...")
+        val processingLabel = when (purpose) {
+            CropPurpose.ENHANCE -> "選択範囲を高画質化中..."
+            CropPurpose.ZOOM -> "選択範囲を超解像中..."
+        }
+        val processingId = addProcessingMessage(processingLabel)
 
         viewModelScope.launch {
             try {
-                val response = processRegionZoom(uri, left, top, right, bottom, imgW, imgH)
+                val response = processRegionZoom(uri, left, top, right, bottom, imgW, imgH, purpose)
                 replaceMessage(
                     processingId,
                     ChatMessage(id = processingId, role = ChatMessage.Role.ASSISTANT, text = response)
@@ -283,13 +302,18 @@ class MainViewModel : ViewModel() {
 
         // ズーム要求 → 範囲選択モードに入る
         if (isZoomRequest) {
-            enterCropMode(imageUri!!)
+            enterCropMode(imageUri!!, CropPurpose.ZOOM)
+            return
+        }
+
+        // 高画質化要求 → 範囲選択モードに入る
+        if (isEnhanceRequest) {
+            enterCropMode(imageUri!!, CropPurpose.ENHANCE)
             return
         }
 
         val processingLabel = when {
             isOcrRequest -> "テキスト読み取り中..."
-            isEnhanceRequest -> "超解像処理中..."
             imageUri != null -> "画像を分析中..."
             else -> "考え中..."
         }
@@ -319,8 +343,8 @@ class MainViewModel : ViewModel() {
         }
     }
 
-    /** ズーム要求時に範囲選択モードに入る */
-    private fun enterCropMode(uri: Uri) {
+    /** ズーム/高画質化要求時に範囲選択モードに入る */
+    private fun enterCropMode(uri: Uri, purpose: CropPurpose) {
         viewModelScope.launch(Dispatchers.IO) {
             val context = app.applicationContext
             val imgSize = RegionDecoder.getImageSize(context, uri)
@@ -337,15 +361,20 @@ class MainViewModel : ViewModel() {
             }
 
             val (w, h) = imgSize
+            val actionText = when (purpose) {
+                CropPurpose.ENHANCE -> "高画質化したい範囲"
+                CropPurpose.ZOOM -> "拡大したい範囲"
+            }
             addMessage(
                 ChatMessage(
                     role = ChatMessage.Role.ASSISTANT,
-                    text = "画像上で拡大したい範囲をドラッグで選択してください (${w}×${h})"
+                    text = "画像上で${actionText}をドラッグで選択してください (${w}×${h})"
                 )
             )
 
             _uiState.value = _uiState.value.copy(
                 cropMode = true,
+                cropPurpose = purpose,
                 cropImageUri = uri,
                 cropThumbnail = thumbnail,
                 cropImageWidth = w,
@@ -359,7 +388,8 @@ class MainViewModel : ViewModel() {
     private suspend fun processRegionZoom(
         uri: Uri,
         left: Float, top: Float, right: Float, bottom: Float,
-        imgW: Int, imgH: Int
+        imgW: Int, imgH: Int,
+        purpose: CropPurpose
     ): String = withContext(Dispatchers.IO) {
         val context = app.applicationContext
 
@@ -379,9 +409,18 @@ class MainViewModel : ViewModel() {
         val result = routeC?.process(safeCopy)
 
         if (result != null && result.success) {
-            val savedUri = saveBitmapToGallery(result.bitmap, "Zoom")
+            val savePrefix = when (purpose) {
+                CropPurpose.ENHANCE -> "Enhanced"
+                CropPurpose.ZOOM -> "Zoom"
+            }
+            val resultLabel = when (purpose) {
+                CropPurpose.ENHANCE -> "✅ 高画質化完了"
+                CropPurpose.ZOOM -> "✅ デジタルズーム完了"
+            }
+
+            val savedUri = saveBitmapToGallery(result.bitmap, savePrefix)
             val responseText = buildString {
-                appendLine("✅ デジタルズーム完了 (${result.method})")
+                appendLine("${resultLabel} (${result.method})")
                 appendLine("📐 元画像: ${imgW}×${imgH}")
                 appendLine("📐 選択範囲: ${safeCopy.width}×${safeCopy.height}")
                 appendLine("📐 出力: ${result.bitmap.width}×${result.bitmap.height}")

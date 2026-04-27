@@ -48,6 +48,8 @@ fun CropSelector(
     thumbnail: Bitmap,
     imageWidth: Int,
     imageHeight: Int,
+    headerLabel: String = "拡大したい範囲をドラッグで選択",
+    confirmLabel: String = "この範囲を超解像",
     onConfirm: (left: Float, top: Float, right: Float, bottom: Float) -> Unit,
     onCancel: () -> Unit,
     modifier: Modifier = Modifier
@@ -70,7 +72,7 @@ fun CropSelector(
         horizontalAlignment = Alignment.CenterHorizontally
     ) {
         Text(
-            text = "拡大したい範囲をドラッグで選択 (${imageWidth}×${imageHeight})",
+            text = "${headerLabel} (${imageWidth}×${imageHeight})",
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant
         )
@@ -169,7 +171,7 @@ fun CropSelector(
                     containerColor = MaterialTheme.colorScheme.primary
                 )
             ) {
-                Text("この範囲を超解像")
+                Text(confirmLabel)
             }
         }
     }

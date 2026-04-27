@@ -88,10 +88,17 @@ fun MainScreen(
 
                 // 範囲選択モード中はクロップUIを表示
                 if (uiState.cropMode && uiState.cropThumbnail != null) {
+                    val (confirmLabel, headerLabel) = when (uiState.cropPurpose) {
+                        CropPurpose.ENHANCE -> "この範囲を高画質化" to "高画質化したい範囲をドラッグで選択"
+                        CropPurpose.ZOOM -> "この範囲を超解像" to "拡大したい範囲をドラッグで選択"
+                    }
+
                     CropSelector(
                         thumbnail = uiState.cropThumbnail!!,
                         imageWidth = uiState.cropImageWidth,
                         imageHeight = uiState.cropImageHeight,
+                        headerLabel = headerLabel,
+                        confirmLabel = confirmLabel,
                         onConfirm = { left, top, right, bottom ->
                             viewModel.onCropConfirmed(left, top, right, bottom)
                         },
