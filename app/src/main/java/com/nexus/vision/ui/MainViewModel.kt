@@ -363,8 +363,9 @@ class MainViewModel : ViewModel() {
     ): String = withContext(Dispatchers.IO) {
         val context = app.applicationContext
 
+        // ズーム領域も4096まで許容して高精細に
         val regionBitmap = RegionDecoder.decodeRegion(
-            context, uri, left, top, right, bottom, maxOutputSide = 2048
+            context, uri, left, top, right, bottom, maxOutputSide = 4096
         ) ?: return@withContext "⚠️ 選択領域のデコードに失敗しました"
 
         val safeCopy = if (regionBitmap.config != Bitmap.Config.ARGB_8888) {
@@ -382,7 +383,7 @@ class MainViewModel : ViewModel() {
             val responseText = buildString {
                 appendLine("✅ デジタルズーム完了 (${result.method})")
                 appendLine("📐 元画像: ${imgW}×${imgH}")
-                appendLine("📐 選択領域: ${safeCopy.width}×${safeCopy.height}")
+                appendLine("📐 選択範囲: ${safeCopy.width}×${safeCopy.height}")
                 appendLine("📐 出力: ${result.bitmap.width}×${result.bitmap.height}")
                 appendLine("⏱ ${result.timeMs}ms")
                 if (savedUri != null) {
@@ -509,31 +510,51 @@ class MainViewModel : ViewModel() {
                 ?: return@withContext "⚠️ 画像サイズを取得できません"
             val (origW, origH) = imgSize
 
-            val decoded = RegionDecoder.decodeSafe(context, uri, 2048)
+            val maxOutputPixels = 4096L * 4096  // 出力の最大ピクセル数（約64MB）
+            val origPixels = origW.toLong() * origH
+
+            // 出力可能な最大サイズを計算
+            val maxDecodeSide = if (origPixels <= maxOutputPixels) {
+                // 元サイズが安全範囲内 → 元サイズでデコード
+                maxOf(origW, origH)
+            } else {
+                // 巨大画像 → Bitmap.createBitmap で確保可能な最大に制限
+                4096
+            }
+
+            Log.i(TAG, "Enhance: original=${origW}x${origH}, maxDecode=$maxDecodeSide")
+
+            val decoded = RegionDecoder.decodeSafe(context, uri, maxDecodeSide)
                 ?: return@withContext "⚠️ 画像のデコードに失敗しました"
 
             val safeCopy = if (decoded.config != Bitmap.Config.ARGB_8888) {
                 val copy = decoded.copy(Bitmap.Config.ARGB_8888, false)
                 decoded.recycle()
-                copy ?: return@withContext "⚠️ 画像のコピーに失敗しました"
+                copy ?: return@withContext "⚠️ コピーに失敗しました"
             } else {
                 decoded
             }
+
+            Log.i(TAG, "Decoded: ${safeCopy.width}x${safeCopy.height}")
 
             val result = routeC?.process(safeCopy)
 
             if (result != null && result.success) {
                 val savedUri = saveBitmapToGallery(result.bitmap, "Enhanced")
                 val responseText = buildString {
-                    appendLine("✅ 超解像完了 (${result.method})")
+                    appendLine("✅ 高画質化完了 (${result.method})")
                     appendLine("📐 元画像: ${origW}×${origH}")
-                    appendLine("📐 処理: ${safeCopy.width}×${safeCopy.height} → ${result.bitmap.width}×${result.bitmap.height}")
+                    appendLine("📐 処理入力: ${safeCopy.width}×${safeCopy.height}")
+                    appendLine("📐 出力: ${result.bitmap.width}×${result.bitmap.height}")
                     appendLine("⏱ ${result.timeMs}ms")
                     if (savedUri != null) {
                         appendLine("📁 Pictures/NexusVision/ に保存")
                     }
-                    appendLine()
-                    appendLine("💡 部分拡大は「ズーム」と送信してください")
+                    if (origPixels > maxOutputPixels) {
+                        appendLine()
+                        appendLine("💡 この画像は非常に大きいため、4096pxに制限して処理しました")
+                        appendLine("💡 部分拡大は「ズーム」で範囲選択すると元解像度で鮮明に処理できます")
+                    }
                 }
                 safeCopy.recycle()
                 result.bitmap.recycle()
@@ -542,7 +563,7 @@ class MainViewModel : ViewModel() {
                 val savedUri = saveBitmapToGallery(safeCopy, "Original")
                 safeCopy.recycle()
                 buildString {
-                    appendLine("⚠️ 超解像処理に失敗しました")
+                    appendLine("⚠️ 高画質化に失敗しました")
                     appendLine("元画像をそのまま保存しました")
                     if (savedUri != null) appendLine("📁 Pictures/NexusVision/ に保存済")
                 }

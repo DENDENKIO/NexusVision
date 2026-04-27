@@ -23,10 +23,10 @@ class RouteCProcessor(private val context: Context) {
         val elapsed = System.currentTimeMillis() - startTime
 
         return if (result != null) {
-            val method = if (result.width > bitmap.width) {
-                "NCNN Real-ESRGAN 4× (Vulkan GPU)"
-            } else {
-                "Unsharp Mask シャープ化 (Native)"
+            val method = when {
+                result.width > bitmap.width -> "NCNN Real-ESRGAN 4× (Vulkan GPU)"
+                result.width == bitmap.width && result.height == bitmap.height -> "Tiled Laplacian Synthesis (周波数分離)"
+                else -> "Unsharp Mask シャープ化 (Native)"
             }
             Log.i(TAG, "Success: ${bitmap.width}x${bitmap.height} -> ${result.width}x${result.height} in ${elapsed}ms [$method]")
             ProcessResult(result, method, elapsed, true)
