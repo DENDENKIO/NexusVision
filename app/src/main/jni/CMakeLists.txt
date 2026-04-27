@@ -15,6 +15,7 @@ find_library(ANDROID_LIB android)
 add_library(realesrgan_native SHARED
     realesrgan_simple.cpp
     realesrgan_jni.cpp
+    image_fusion.cpp
 )
 
 target_link_libraries(realesrgan_native

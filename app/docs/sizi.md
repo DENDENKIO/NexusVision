@@ -1,65 +1,70 @@
-
-
-
-
-**方針：**
-1. Vulkan GPUアクセラレーションを有効化（Mali-G68 MC4対応）
-2. `animevideov3` 軽量モデルを使用
-3. タイルサイズを32まで下げ可能に
-4. FP16を最大活用（メモリ半減）
-5. スレッド数を1:1:1に制限
-6. 入力サイズを安全な範囲に制限
-7. 段階的処理の基盤を用意
-
-まずVulkan対応ncnnに戻すため、ビルド設定からC++、Kotlin全てを修正します。
+Now I have complete knowledge of the codebase. Let me write the comprehensive implementation.
 
 ---
 
-### Step 1: ncnnライブラリを差し替え（差し替え済み）
+現在のコードベース全体を精査しました。以下に、**Guided Filter + Haar DWT Fusion + IBP** の3段パイプラインを現在のプロジェクトに完全統合するための変更内容と、コード生成AIに渡すプロンプトを提示します。
 
-`ncnn-20260113-android-vulkan.zip` を使います。解凍して配置：
+---
+
+## コード生成AIに渡すプロンプト
+
+以下をそのままコピーしてコード生成AI（Claude, Cursor, etc.）に貼り付けてください。
+
+---
+
+````markdown
+# NexusVision: Guided Filter + DWT Fusion + IBP 統合パイプライン実装
+
+## プロジェクト概要
+Android (Kotlin + NDK/C++) の画像超解像アプリ。Real-ESRGAN (ncnn Vulkan) で4×超解像し、
+元画像とAI結果を高品質に融合する。現在のラプラシアンピラミッド合成は元画像のセンサーノイズを
+再注入してしまうため、以下の3段階パイプラインに置き換える。
+
+## 新パイプライン（数学的根拠）
 
 ```
-app/src/main/jni/ncnn-android-vulkan/
-├── arm64-v8a/
-│   ├── include/ncnn/
-│   └── lib/
-│       ├── libncnn.a
-│       └── cmake/ncnn/ncnnConfig.cmake
+入力: original (W×H), ai_enhanced (W×H, AI超解像を元サイズにリサイズ済み)
+
+Stage 1: Guided Filter Edge Transfer (He & Sun, TPAMI 2013)
+  - guidance = ai_enhanced, input = original
+  - ウィンドウ ωk 内で: Ak = cov(G,I)/(var(G)+ε), Bk = μI - Ak·μG
+  - 出力: Oi = mean(A)·Gi + mean(B)
+  - Fast版: s=4でサブサンプリング → O(N/16) 計算量
+  → guided_result (ノイズ除去 + AIエッジ転写)
+
+Stage 2: Haar DWT Frequency Fusion
+  - DWT(guided_result) → LL_g, LH_g, HL_g, HH_g
+  - DWT(ai_enhanced)   → LL_a, LH_a, HL_a, HH_a
+  - LL_out = LL_a (AIのクリーンな低周波)
+  - LH_out = max(|LH_g|,|LH_a|) の符号付き選択 (水平エッジ)
+  - HL_out = max(|HL_g|,|HL_a|) の符号付き選択 (垂直エッジ)
+  - HH_out = HH_a (ノイズ排除: 元画像のHHは捨てる)
+  - IDWT → dwt_fused
+
+Stage 3: Iterative Back-Projection (IBP, 2反復)
+  - lowRes = original を512pxに縮小したもの (AI入力と同じ)
+  - X₀ = dwt_fused
+  - X_{t+1} = Xt + λ · Upsample(lowRes - Downsample(Xt))
+  - λ=0.2, iterations=2
+  → final_output (元サイズ W×H)
 ```
 
-### Step 2: `CMakeLists.txt`
+## 現在のファイル構成と変更方針
 
-```cmake
-# ファイルパス: app/src/main/jni/CMakeLists.txt
-cmake_minimum_required(VERSION 3.22)
-project(realesrgan_native CXX)
+変更するファイルは4つ + 新規1つ:
 
-set(CMAKE_CXX_STANDARD 17)
+### 1. 新規: `app/src/main/jni/image_fusion.h` (新ファイル)
+### 2. 新規: `app/src/main/jni/image_fusion.cpp` (新ファイル)
+### 3. 変更: `app/src/main/jni/realesrgan_jni.cpp` (JNI関数追加)
+### 4. 変更: `app/src/main/jni/CMakeLists.txt` (ソース追加)
+### 5. 変更: `app/src/main/java/com/nexus/vision/ncnn/RealEsrganBridge.kt` (JNI宣言追加)
+### 6. 変更: `app/src/main/java/com/nexus/vision/ncnn/NcnnSuperResolution.kt` (パイプライン書換)
 
-# Vulkan版ncnnに変更
-set(ncnn_DIR "${CMAKE_SOURCE_DIR}/ncnn-android-vulkan/${ANDROID_ABI}/lib/cmake/ncnn")
-find_package(ncnn REQUIRED)
+RouteCProcessor.kt と MainViewModel.kt は変更不要（インターフェース不変）。
 
-find_library(JNIGRAPHICS_LIB jnigraphics)
-find_library(LOG_LIB log)
-find_library(ANDROID_LIB android)
+## 既存コード（変更しないもの、参照用）
 
-add_library(realesrgan_native SHARED
-    realesrgan_simple.cpp
-    realesrgan_jni.cpp
-)
-
-target_link_libraries(realesrgan_native
-    ncnn
-    ${JNIGRAPHICS_LIB}
-    ${LOG_LIB}
-    ${ANDROID_LIB}
-)
-```
-
-### Step 3: `realesrgan_simple.h`
-
+### realesrgan_simple.h（変更なし）
 ```cpp
 // ファイルパス: app/src/main/jni/realesrgan_simple.h
 #ifndef REALESRGAN_SIMPLE_H
@@ -70,21 +75,31 @@ target_link_libraries(realesrgan_native
 
 class RealESRGANSimple {
 public:
-    RealESRGANSimple(int gpuid = -1); // -1=auto, 0=first GPU
+    RealESRGANSimple(int gpuid = -1);
     ~RealESRGANSimple();
 
     int load(const unsigned char* paramBuffer, int paramLen,
              const unsigned char* modelBuffer, int modelLen);
     int load(const std::string& paramPath, const std::string& modelPath);
 
-    // 入力: RGBA, 出力: RGBA
     int process(const unsigned char* inputPixels, int w, int h,
                 unsigned char* outputPixels);
+
+    static int sharpen(const unsigned char* inputPixels, int w, int h,
+                       unsigned char* outputPixels, float strength);
+
+    // ★ laplacianBlend は残すが使わなくなる（後方互換）
+    static int laplacianBlend(const unsigned char* originalPixels,
+                              const unsigned char* enhancedPixels,
+                              int w, int h,
+                              unsigned char* outputPixels,
+                              float detailStrength,
+                              float sharpenStrength);
 
     bool isLoaded() const { return loaded; }
 
     int scale = 4;
-    int tileSize = 32;      // デフォルト32（安全重視）
+    int tileSize = 32;
     int prepadding = 10;
 
 private:
@@ -97,595 +112,499 @@ private:
 #endif
 ```
 
-### Step 4: `realesrgan_simple.cpp`
-
-```cpp
-// ファイルパス: app/src/main/jni/realesrgan_simple.cpp
-#include "realesrgan_simple.h"
-#include <algorithm>
-#include <cstring>
-#include <cmath>
-#include <vector>
-#include <android/log.h>
-#include "datareader.h"
-#include "gpu.h"
-
-#define TAG "RealESRGAN"
-#define LOGI(...) __android_log_print(ANDROID_LOG_INFO, TAG, __VA_ARGS__)
-#define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, TAG, __VA_ARGS__)
-#define LOGW(...) __android_log_print(ANDROID_LOG_WARN, TAG, __VA_ARGS__)
-
-RealESRGANSimple::RealESRGANSimple(int gpuid) : gpuid(gpuid), loaded(false), useGpu(false) {
-    // Vulkan GPU が使えるか確認
-    int gpuCount = ncnn::get_gpu_count();
-    LOGI("Vulkan GPU count: %d", gpuCount);
-
-    if (gpuCount > 0) {
-        if (gpuid < 0) gpuid = 0; // auto -> first GPU
-        this->gpuid = gpuid;
-        useGpu = true;
-
-        net.opt.use_vulkan_compute = true;
-        // FP16で計算（メモリ半減・速度向上、画質差なし）
-        net.opt.use_fp16_packed = true;
-        net.opt.use_fp16_storage = true;
-        net.opt.use_fp16_arithmetic = true; // Mali-G68はFP16演算対応
-        net.opt.use_packing_layout = true;
-        // スレッド: GPU使用時は1で十分（GPU側で並列化）
-        net.opt.num_threads = 1;
-
-        LOGI("Vulkan GPU enabled: gpu_id=%d, FP16=ON", gpuid);
-    } else {
-        // Vulkan非対応 → CPUフォールバック
-        useGpu = false;
-        net.opt.use_vulkan_compute = false;
-        net.opt.use_fp16_packed = true;
-        net.opt.use_fp16_storage = true;
-        net.opt.use_fp16_arithmetic = false;
-        net.opt.use_packing_layout = true;
-        net.opt.num_threads = 2; // CPU時はスレッド2
-        LOGW("No Vulkan GPU, falling back to CPU (FP16 storage)");
-    }
-}
-
-RealESRGANSimple::~RealESRGANSimple() {
-    net.clear();
-}
-
-int RealESRGANSimple::load(const unsigned char* paramBuffer, int paramLen,
-                            const unsigned char* modelBuffer, int modelLen) {
-    // param はテキスト → null終端必要
-    std::vector<char> paramStr(paramLen + 1);
-    memcpy(paramStr.data(), paramBuffer, paramLen);
-    paramStr[paramLen] = '\0';
-
-    int ret = net.load_param_mem(paramStr.data());
-    if (ret != 0) {
-        LOGE("load_param_mem failed: %d", ret);
-        return -1;
-    }
-    LOGI("Param loaded, ret=%d", ret);
-
-    // model はバイナリ → DataReaderFromMemory
-    const unsigned char* modelPtr = modelBuffer;
-    ncnn::DataReaderFromMemory dr(modelPtr);
-    ret = net.load_model(dr);
-    if (ret != 0) {
-        LOGE("load_model failed: %d", ret);
-        return -2;
-    }
-
-    loaded = true;
-    LOGI("Model loaded (param=%d bytes, model=%d bytes, gpu=%s)",
-         paramLen, modelLen, useGpu ? "Vulkan" : "CPU");
-    return 0;
-}
-
-int RealESRGANSimple::load(const std::string& paramPath, const std::string& modelPath) {
-    int ret = net.load_param(paramPath.c_str());
-    if (ret != 0) {
-        LOGE("load_param(%s) failed: %d", paramPath.c_str(), ret);
-        return -1;
-    }
-
-    ret = net.load_model(modelPath.c_str());
-    if (ret != 0) {
-        LOGE("load_model(%s) failed: %d", modelPath.c_str(), ret);
-        return -2;
-    }
-
-    loaded = true;
-    LOGI("Model loaded from files (gpu=%s)", useGpu ? "Vulkan" : "CPU");
-    return 0;
-}
-
-int RealESRGANSimple::process(const unsigned char* inputPixels, int w, int h,
-                               unsigned char* outputPixels) {
-    if (!loaded) {
-        LOGE("Model not loaded!");
-        return -1;
-    }
-
-    const int TILE = tileSize;
-    const int outW = w * scale;
-    const int outH = h * scale;
-
-    const int xtiles = (w + TILE - 1) / TILE;
-    const int ytiles = (h + TILE - 1) / TILE;
-    const int totalTiles = xtiles * ytiles;
-
-    LOGI("Processing %dx%d -> %dx%d (tiles=%dx%d=%d, tile=%d, pad=%d, gpu=%s)",
-         w, h, outW, outH, xtiles, ytiles, totalTiles, TILE, prepadding,
-         useGpu ? "Vulkan" : "CPU");
-
-    for (int yi = 0; yi < ytiles; yi++) {
-        for (int xi = 0; xi < xtiles; xi++) {
-            int inTileX0 = xi * TILE;
-            int inTileY0 = yi * TILE;
-            int inTileX1 = std::min(inTileX0 + TILE, w);
-            int inTileY1 = std::min(inTileY0 + TILE, h);
-
-            int tileW = inTileX1 - inTileX0;
-            int tileH = inTileY1 - inTileY0;
-
-            // パディング付き入力
-            int padX0 = std::max(inTileX0 - prepadding, 0);
-            int padY0 = std::max(inTileY0 - prepadding, 0);
-            int padX1 = std::min(inTileX1 + prepadding, w);
-            int padY1 = std::min(inTileY1 + prepadding, h);
-
-            int padW = padX1 - padX0;
-            int padH = padY1 - padY0;
-
-            // RGBA → RGB
-            ncnn::Mat in(padW, padH, 3);
-            {
-                const float scale_val = 1.0f / 255.0f;
-                float* rPtr = in.channel(0);
-                float* gPtr = in.channel(1);
-                float* bPtr = in.channel(2);
-
-                for (int row = 0; row < padH; row++) {
-                    for (int col = 0; col < padW; col++) {
-                        int srcIdx = ((padY0 + row) * w + (padX0 + col)) * 4;
-                        int dstIdx = row * padW + col;
-                        rPtr[dstIdx] = inputPixels[srcIdx + 0] * scale_val;
-                        gPtr[dstIdx] = inputPixels[srcIdx + 1] * scale_val;
-                        bPtr[dstIdx] = inputPixels[srcIdx + 2] * scale_val;
-                    }
-                }
-            }
-
-            // 推論
-            ncnn::Extractor ex = net.create_extractor();
-            if (useGpu) {
-                ex.set_blob_vkallocator(net.opt.blob_vkallocator);
-                ex.set_workspace_vkallocator(net.opt.workspace_vkallocator);
-                ex.set_staging_vkallocator(net.opt.staging_vkallocator);
-            }
-
-            ex.input("data", in);
-
-            ncnn::Mat out;
-            int ret = ex.extract("output", out);
-            if (ret != 0) {
-                LOGE("Inference failed tile (%d,%d): %d", xi, yi, ret);
-                // タイル失敗時: 元ピクセルをコピー（クラッシュしない）
-                for (int row = 0; row < tileH * scale; row++) {
-                    for (int col = 0; col < tileW * scale; col++) {
-                        int outX = inTileX0 * scale + col;
-                        int outY = inTileY0 * scale + row;
-                        if (outX < outW && outY < outH) {
-                            // 元ピクセルを最近傍で引き伸ばし
-                            int srcX = std::min(inTileX0 + col / scale, w - 1);
-                            int srcY = std::min(inTileY0 + row / scale, h - 1);
-                            int srcIdx = (srcY * w + srcX) * 4;
-                            int dstIdx = (outY * outW + outX) * 4;
-                            memcpy(outputPixels + dstIdx, inputPixels + srcIdx, 4);
-                        }
-                    }
-                }
-                LOGW("Tile (%d,%d) fallback to nearest-neighbor", xi, yi);
-                continue;
-            }
-
-            // 出力 float[0..1] → byte → 出力バッファ
-            int outPadW = out.w;
-            int outPadH = out.h;
-
-            int offsetX = (inTileX0 - padX0) * scale;
-            int offsetY = (inTileY0 - padY0) * scale;
-            int outTileW = tileW * scale;
-            int outTileH = tileH * scale;
-
-            const float* rOut = out.channel(0);
-            const float* gOut = out.channel(1);
-            const float* bOut = out.channel(2);
-
-            for (int row = 0; row < outTileH; row++) {
-                for (int col = 0; col < outTileW; col++) {
-                    int srcIdx = (offsetY + row) * outPadW + (offsetX + col);
-                    int outX = inTileX0 * scale + col;
-                    int outY = inTileY0 * scale + row;
-
-                    if (outX < outW && outY < outH && srcIdx < outPadW * outPadH) {
-                        int dstIdx = (outY * outW + outX) * 4;
-                        float r = std::max(0.0f, std::min(1.0f, rOut[srcIdx]));
-                        float g = std::max(0.0f, std::min(1.0f, gOut[srcIdx]));
-                        float b = std::max(0.0f, std::min(1.0f, bOut[srcIdx]));
-                        outputPixels[dstIdx + 0] = (unsigned char)(r * 255.0f + 0.5f);
-                        outputPixels[dstIdx + 1] = (unsigned char)(g * 255.0f + 0.5f);
-                        outputPixels[dstIdx + 2] = (unsigned char)(b * 255.0f + 0.5f);
-                        outputPixels[dstIdx + 3] = 255;
-                    }
-                }
-            }
-
-            int done = yi * xtiles + xi + 1;
-            if (done % 4 == 0 || done == totalTiles) {
-                LOGI("Progress: %d/%d (%.1f%%)", done, totalTiles,
-                     (float)done / totalTiles * 100.0f);
-            }
-        }
-    }
-
-    LOGI("Complete: %dx%d (%s)", outW, outH, useGpu ? "Vulkan GPU" : "CPU");
-    return 0;
-}
-```
-
-### Step 5: `realesrgan_jni.cpp`
-
-```cpp
-// ファイルパス: app/src/main/jni/realesrgan_jni.cpp
-#include <jni.h>
-#include <android/bitmap.h>
-#include <android/asset_manager.h>
-#include <android/asset_manager_jni.h>
-#include <android/log.h>
-#include <cstring>
-#include <string>
-#include <vector>
-#include "realesrgan_simple.h"
-#include "gpu.h"
-
-#define TAG "RealESRGAN_JNI"
-#define LOGI(...) __android_log_print(ANDROID_LOG_INFO, TAG, __VA_ARGS__)
-#define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, TAG, __VA_ARGS__)
-
-static RealESRGANSimple* g_realesrgan = nullptr;
-
-static const int MAX_OUTPUT_PIXELS = 2048 * 2048;
-
-static std::vector<unsigned char> loadAsset(JNIEnv* env, jobject assetManager,
-                                             const std::string& path) {
-    AAssetManager* mgr = AAssetManager_fromJava(env, assetManager);
-    AAsset* asset = AAssetManager_open(mgr, path.c_str(), AASSET_MODE_BUFFER);
-    if (!asset) {
-        LOGE("Failed to open asset: %s", path.c_str());
-        return {};
-    }
-    size_t length = AAsset_getLength(asset);
-    std::vector<unsigned char> buffer(length);
-    AAsset_read(asset, buffer.data(), length);
-    AAsset_close(asset);
-    LOGI("Loaded asset %s: %zu bytes", path.c_str(), length);
-    return buffer;
-}
-
-extern "C" {
-
-JNIEXPORT jboolean JNICALL
-Java_com_nexus_vision_ncnn_RealEsrganBridge_nativeInit(
-    JNIEnv* env, jclass clazz,
-    jobject assetManager,
-    jstring paramPath,
-    jstring modelPath,
-    jint scale,
-    jint tileSize) {
-
-    // Vulkan初期化（アプリ起動後初回のみ）
-    ncnn::create_gpu_instance();
-
-    if (g_realesrgan) {
-        delete g_realesrgan;
-        g_realesrgan = nullptr;
-    }
-
-    const char* paramStr = env->GetStringUTFChars(paramPath, nullptr);
-    const char* modelStr = env->GetStringUTFChars(modelPath, nullptr);
-
-    LOGI("Init: param=%s, model=%s, scale=%d, tile=%d", paramStr, modelStr, scale, tileSize);
-
-    std::vector<unsigned char> paramBuf = loadAsset(env, assetManager, paramStr);
-    std::vector<unsigned char> modelBuf = loadAsset(env, assetManager, modelStr);
-
-    env->ReleaseStringUTFChars(paramPath, paramStr);
-    env->ReleaseStringUTFChars(modelPath, modelStr);
-
-    if (paramBuf.empty() || modelBuf.empty()) {
-        LOGE("Failed to load model files from assets");
-        return JNI_FALSE;
-    }
-
-    // GPU自動検出（0=first GPU, -1にすると内部でauto）
-    g_realesrgan = new RealESRGANSimple(0);
-    g_realesrgan->scale = scale;
-    g_realesrgan->tileSize = tileSize;
-    g_realesrgan->prepadding = 10;
-
-    int ret = g_realesrgan->load(paramBuf.data(), (int)paramBuf.size(),
-                                  modelBuf.data(), (int)modelBuf.size());
-    if (ret != 0) {
-        LOGE("Model load failed: %d", ret);
-        delete g_realesrgan;
-        g_realesrgan = nullptr;
-        return JNI_FALSE;
-    }
-
-    LOGI("RealESRGAN initialized (Vulkan GPU + FP16)");
-    return JNI_TRUE;
-}
-
-JNIEXPORT jobject JNICALL
-Java_com_nexus_vision_ncnn_RealEsrganBridge_nativeProcess(
-    JNIEnv* env, jclass clazz,
-    jobject inputBitmap) {
-
-    if (!g_realesrgan || !g_realesrgan->isLoaded()) {
-        LOGE("Model not initialized");
-        return nullptr;
-    }
-
-    AndroidBitmapInfo inInfo;
-    if (AndroidBitmap_getInfo(env, inputBitmap, &inInfo) != 0) {
-        LOGE("Failed to get bitmap info");
-        return nullptr;
-    }
-
-    if (inInfo.format != ANDROID_BITMAP_FORMAT_RGBA_8888) {
-        LOGE("Unsupported format: %d", inInfo.format);
-        return nullptr;
-    }
-
-    int w = (int)inInfo.width;
-    int h = (int)inInfo.height;
-    int sc = g_realesrgan->scale;
-    int outW = w * sc;
-    int outH = h * sc;
-
-    long long outPixels = (long long)outW * outH;
-    if (outPixels > MAX_OUTPUT_PIXELS) {
-        LOGE("Output too large: %dx%d = %lld pixels (max %d)", outW, outH, outPixels, MAX_OUTPUT_PIXELS);
-        return nullptr;
-    }
-
-    LOGI("Input: %dx%d -> Output: %dx%d", w, h, outW, outH);
-
-    void* inPixels = nullptr;
-    if (AndroidBitmap_lockPixels(env, inputBitmap, &inPixels) != 0) {
-        LOGE("Failed to lock input pixels");
-        return nullptr;
-    }
-
-    std::vector<unsigned char> inputData;
-    try {
-        inputData.resize(w * h * 4);
-    } catch (...) {
-        LOGE("Input buffer alloc failed");
-        AndroidBitmap_unlockPixels(env, inputBitmap);
-        return nullptr;
-    }
-
-    for (int row = 0; row < h; row++) {
-        unsigned char* srcRow = (unsigned char*)inPixels + row * inInfo.stride;
-        unsigned char* dstRow = inputData.data() + row * w * 4;
-        memcpy(dstRow, srcRow, w * 4);
-    }
-    AndroidBitmap_unlockPixels(env, inputBitmap);
-
-    std::vector<unsigned char> outputData;
-    try {
-        outputData.resize((size_t)outW * outH * 4, 0);
-    } catch (...) {
-        LOGE("Output buffer alloc failed: %dx%d", outW, outH);
-        return nullptr;
-    }
-
-    int ret = g_realesrgan->process(inputData.data(), w, h, outputData.data());
-    inputData.clear();
-    inputData.shrink_to_fit();
-
-    if (ret != 0) {
-        LOGE("Process failed: %d", ret);
-        return nullptr;
-    }
-
-    // Bitmap作成
-    jclass bitmapClass = env->FindClass("android/graphics/Bitmap");
-    jclass configClass = env->FindClass("android/graphics/Bitmap$Config");
-    jfieldID argb8888Field = env->GetStaticFieldID(configClass, "ARGB_8888",
-                                                     "Landroid/graphics/Bitmap$Config;");
-    jobject argb8888 = env->GetStaticObjectField(configClass, argb8888Field);
-    jmethodID createMethod = env->GetStaticMethodID(bitmapClass, "createBitmap",
-        "(IILandroid/graphics/Bitmap$Config;)Landroid/graphics/Bitmap;");
-    jobject outBitmap = env->CallStaticObjectMethod(bitmapClass, createMethod,
-                                                      outW, outH, argb8888);
-
-    if (env->ExceptionCheck()) {
-        env->ExceptionDescribe();
-        env->ExceptionClear();
-        LOGE("OOM creating bitmap %dx%d", outW, outH);
-        return nullptr;
-    }
-    if (!outBitmap) {
-        LOGE("Failed to create bitmap");
-        return nullptr;
-    }
-
-    AndroidBitmapInfo outInfo;
-    AndroidBitmap_getInfo(env, outBitmap, &outInfo);
-
-    void* outPixelsPtr = nullptr;
-    if (AndroidBitmap_lockPixels(env, outBitmap, &outPixelsPtr) != 0) {
-        LOGE("Failed to lock output pixels");
-        return nullptr;
-    }
-
-    for (int row = 0; row < outH; row++) {
-        unsigned char* srcRow = outputData.data() + row * outW * 4;
-        unsigned char* dstRow = (unsigned char*)outPixelsPtr + row * outInfo.stride;
-        memcpy(dstRow, srcRow, outW * 4);
-    }
-    AndroidBitmap_unlockPixels(env, outBitmap);
-
-    LOGI("Output bitmap: %dx%d", outW, outH);
-    return outBitmap;
-}
-
-JNIEXPORT void JNICALL
-Java_com_nexus_vision_ncnn_RealEsrganBridge_nativeRelease(
-    JNIEnv* env, jclass clazz) {
-    if (g_realesrgan) {
-        delete g_realesrgan;
-        g_realesrgan = nullptr;
-        LOGI("Released");
-    }
-    ncnn::destroy_gpu_instance();
-}
-
-JNIEXPORT jboolean JNICALL
-Java_com_nexus_vision_ncnn_RealEsrganBridge_nativeIsLoaded(
-    JNIEnv* env, jclass clazz) {
-    return (g_realesrgan && g_realesrgan->isLoaded()) ? JNI_TRUE : JNI_FALSE;
-}
-
-} // extern "C"
-```
-
-### Step 6: `NcnnSuperResolution.kt`
-
+### RealEsrganBridge.kt（現在の状態）
 ```kotlin
-// ファイルパス: app/src/main/java/com/nexus/vision/ncnn/NcnnSuperResolution.kt
 package com.nexus.vision.ncnn
+
+import android.content.res.AssetManager
+import android.graphics.Bitmap
+
+object RealEsrganBridge {
+    init { System.loadLibrary("realesrgan_native") }
+
+    external fun nativeInit(assetManager: AssetManager, paramPath: String,
+                            modelPath: String, scale: Int, tileSize: Int): Boolean
+    external fun nativeProcess(inputBitmap: Bitmap): Bitmap?
+    external fun nativeSharpen(inputBitmap: Bitmap, strength: Float): Bitmap?
+    external fun nativeLaplacianBlend(originalBitmap: Bitmap, enhancedBitmap: Bitmap,
+                                      detailStrength: Float, sharpenStrength: Float): Bitmap?
+    external fun nativeRelease()
+    external fun nativeIsLoaded(): Boolean
+}
+```
+
+### RouteCProcessor.kt（変更なし）
+```kotlin
+package com.nexus.vision.pipeline
 
 import android.content.Context
 import android.graphics.Bitmap
 import android.util.Log
 
+class RouteCProcessor(private val context: Context) {
+    companion object { private const val TAG = "RouteCProcessor" }
+    private var sr: com.nexus.vision.ncnn.NcnnSuperResolution? = null
+
+    fun initialize(): Boolean {
+        sr = com.nexus.vision.ncnn.NcnnSuperResolution()
+        return sr?.initialize(context) ?: false
+    }
+
+    suspend fun process(bitmap: Bitmap): ProcessResult {
+        val startTime = System.currentTimeMillis()
+        val result = sr?.upscale(bitmap)
+        val elapsed = System.currentTimeMillis() - startTime
+        return if (result != null) {
+            val method = when {
+                result.width > bitmap.width -> "NCNN Real-ESRGAN 4× (Vulkan GPU)"
+                result.width == bitmap.width && result.height == bitmap.height ->
+                    "GuidedFilter+DWT+IBP Fusion"
+                else -> "Unsharp Mask シャープ化 (Native)"
+            }
+            Log.i(TAG, "Success: ${bitmap.width}x${bitmap.height} -> " +
+                  "${result.width}x${result.height} in ${elapsed}ms [$method]")
+            ProcessResult(result, method, elapsed, true)
+        } else {
+            Log.w(TAG, "Failed, returning original")
+            ProcessResult(bitmap, "passthrough (failed)", elapsed, false)
+        }
+    }
+
+    fun release() { sr?.release(); sr = null }
+
+    data class ProcessResult(val bitmap: Bitmap, val method: String,
+                             val elapsedMs: Long, val success: Boolean) {
+        val timeMs: Long get() = elapsedMs
+    }
+}
+```
+
+### CMakeLists.txt（現在の状態）
+```cmake
+cmake_minimum_required(VERSION 3.22)
+project(realesrgan_native CXX)
+set(CMAKE_CXX_STANDARD 17)
+set(ncnn_DIR "${CMAKE_SOURCE_DIR}/ncnn-android-vulkan/${ANDROID_ABI}/lib/cmake/ncnn")
+find_package(ncnn REQUIRED)
+find_library(JNIGRAPHICS_LIB jnigraphics)
+find_library(LOG_LIB log)
+find_library(ANDROID_LIB android)
+add_library(realesrgan_native SHARED
+    realesrgan_simple.cpp
+    realesrgan_jni.cpp
+)
+target_link_libraries(realesrgan_native ncnn ${JNIGRAPHICS_LIB} ${LOG_LIB} ${ANDROID_LIB})
+```
+
+## 重要な制約条件
+
+1. **Android NDK はデフォルトで `-fno-exceptions`**: try-catch は絶対に使わない。エラーはreturn値で処理。
+2. **外部ライブラリ不可**: OpenCV, Eigen等は使えない。純粋C++17 + Android NDK + ncnn のみ。
+3. **メモリ制約**: DOOGEE S200 (6GB RAM, Mali-G68 MC4)。1枚のビットマップは最大 4096×4096 ARGB_8888 (≈64MB)。
+   中間バッファは最小限に。float配列はチャンネル別に確保し、使い終わったらすぐ解放 (vector::clear + shrink_to_fit)。
+4. **入力画像サイズ**: `NcnnSuperResolution.kt` から呼ばれる時点で最大 4096×4096。
+   AI超解像への入力は最大512px (4×で2048px出力)。最終出力は元入力と同サイズ。
+5. **タイル処理**: 大きい画像 (>512px) は PROCESS_TILE=512, PROCESS_OVERLAP=32 でタイル分割して
+   タイルごとに3段パイプラインを適用。出力サイズ＝入力サイズ。
+6. **JNI関数のシグネチャ**: パッケージ名は `com.nexus.vision.ncnn.RealEsrganBridge`。
+   JNI関数名は `Java_com_nexus_vision_ncnn_RealEsrganBridge_nativeFusionPipeline`。
+
+---
+
+## 出力してほしいファイル（全6ファイルの完全なコード）
+
+### ファイル1: `app/src/main/jni/image_fusion.h`
+
+新規ファイル。以下の関数を宣言:
+
+```cpp
+#ifndef IMAGE_FUSION_H
+#define IMAGE_FUSION_H
+#include <cstdint>
+
+namespace ImageFusion {
+
+// Stage 1: Fast Guided Filter (He & Sun 2013)
+// guidance/input/output: RGBA uint8 バッファ (w*h*4 bytes)
+// r: フィルタ半径 (推奨: 8)
+// eps: 正規化パラメータ (推奨: 0.01, [0,1]スケールで)
+// s: サブサンプリング比 (推奨: 4)
+// 戻り値: 0=成功, -1=失敗
+int guidedFilter(const uint8_t* guidance, const uint8_t* input,
+                 int w, int h, uint8_t* output,
+                 int r, float eps, int s);
+
+// Stage 2: Haar DWT Fusion
+// img1: guided filter結果, img2: AI enhanced (共にRGBA, 同サイズ)
+// output: RGBA (同サイズ)
+// w, h は偶数であること (奇数の場合は内部で-1して処理、最後の行/列はコピー)
+int dwtFusion(const uint8_t* img1, const uint8_t* img2,
+              int w, int h, uint8_t* output);
+
+// Stage 3: Iterative Back-Projection
+// highRes: 高解像度推定 (RGBA, hrW*hrH), IN-PLACEで更新
+// lowRes: 低解像度参照 (RGBA, lrW*lrH)
+// lambda: 更新ステップ (推奨: 0.2)
+// iterations: 反復回数 (推奨: 2)
+int iterativeBackProjection(uint8_t* highRes, int hrW, int hrH,
+                            const uint8_t* lowRes, int lrW, int lrH,
+                            float lambda, int iterations);
+
+// 3段統合パイプライン
+// original: 元画像RGBA (w*h)
+// aiEnhanced: AI超解像をwxhにリサイズ済みRGBA
+// aiLowRes: AI入力(512px版) RGBA (lrW*lrH)
+// output: 出力RGBA (w*h)
+int fusionPipeline(const uint8_t* original, const uint8_t* aiEnhanced,
+                   int w, int h,
+                   const uint8_t* aiLowRes, int lrW, int lrH,
+                   uint8_t* output);
+
+} // namespace ImageFusion
+#endif
+```
+
+### ファイル2: `app/src/main/jni/image_fusion.cpp`
+
+完全な実装。以下の詳細仕様に従うこと:
+
+**guidedFilter の実装 (Fast Guided Filter, Algorithm 2 from He 2015):**
+1. guidance I と input p をサブサンプリング (s=4, bilinear) → I', p' (サイズ w/s × h/s)
+2. r' = r / s
+3. Box filter (積分画像で O(1) 実装) を使って:
+   - meanI = boxFilter(I', r')
+   - meanP = boxFilter(p', r')
+   - corrI = boxFilter(I'*I', r')
+   - corrIP = boxFilter(I'*p', r')
+4. varI = corrI - meanI*meanI
+5. covIP = corrIP - meanI*meanP
+6. a = covIP / (varI + eps)
+7. b = meanP - a*meanI
+8. meanA = boxFilter(a, r')
+9. meanB = boxFilter(b, r')
+10. meanA, meanB を bilinear upsample して元サイズ w×h へ
+11. output = meanA * I_fullres + meanB
+12. 各チャンネル (R,G,B) 独立に処理。Alpha は original からコピー。
+13. Box filter は積分画像 (integral image / summed area table) で実装し O(1)。
+    integralImage[y][x] = sum of all pixels in [0,0]-[x,y]。
+    boxSum(x0,y0,x1,y1) = I[y1][x1] - I[y0-1][x1] - I[y1][x0-1] + I[y0-1][x0-1]。
+
+**dwtFusion の実装 (2D Haar DWT):**
+1. 各チャンネル (R,G,B) を float [0,255] に変換。
+2. 2D Haar DWT (1レベル):
+   - 行方向: 各行について、偶数/奇数ペアから LL=(a+b)/2, HL=(a-b)/2 を計算。出力は左半分にLL、右半分にHL。
+   - 列方向: 上記結果に対し各列で同様。上半分にLL/LH、下半分にHL/HH。
+   結果: 4サブバンド LL(左上), LH(右上), HL(左下), HH(右下)。各 w/2 × h/2。
+3. 融合ルール:
+   - LL: ai_enhanced のLL を採用 (クリーンな構造)
+   - LH: |img1_LH| >= |img2_LH| なら img1_LH, そうでなければ img2_LH (強いエッジ優先)
+   - HL: 同上
+   - HH: ai_enhanced のHH を採用 (ノイズ排除)
+4. 逆2D Haar DWT (IDWT):
+   - 列方向逆: LL+HL, LL-HL で偶数行/奇数行を復元
+   - 行方向逆: 同様
+5. [0,255] にクランプして uint8 に変換。
+
+**iterativeBackProjection の実装:**
+1. Downsample: highRes (hrW×hrH) → temp (lrW×lrH) をbilinear補間で縮小。
+2. Residual: diff[i] = lowRes[i] - temp[i] (各チャンネル, float演算)
+3. Upsample: diff (lrW×lrH) → correction (hrW×hrH) をbilinear補間で拡大。
+4. Update: highRes[i] = clamp(highRes[i] + lambda * correction[i], 0, 255)
+5. 上記を iterations 回繰り返す。
+
+**fusionPipeline:**
+1. Stage 1: guidedFilter(aiEnhanced, original, w, h, guided_buf, 8, 0.01f, 4)
+2. Stage 2: dwtFusion(guided_buf, aiEnhanced, w, h, fused_buf)
+3. Stage 3: iterativeBackProjection(fused_buf, w, h, aiLowRes, lrW, lrH, 0.2f, 2)
+4. memcpy(output, fused_buf, w*h*4)
+5. 中間バッファは vector で確保し、各stage完了後に clear()+shrink_to_fit() でメモリ解放。
+
+**メモリ最適化:**
+- float バッファはチャンネル1つずつ処理する場合は w*h*sizeof(float)。
+- Guided Filterのサブサンプリング版は (w/4)*(h/4) サイズで動作するためメモリ効率的。
+- DWT は in-place でなく別バッファ使用 (安全のため)。
+- ログは `__android_log_print(ANDROID_LOG_INFO, "ImageFusion", ...)` を使用。
+  各Stage の開始/完了とミリ秒を出力。
+
+### ファイル3: `app/src/main/jni/realesrgan_jni.cpp`
+
+既存コードに以下のJNI関数を**追加** (既存関数は全て残す):
+
+```cpp
+JNIEXPORT jobject JNICALL
+Java_com_nexus_vision_ncnn_RealEsrganBridge_nativeFusionPipeline(
+    JNIEnv* env, jclass clazz,
+    jobject originalBitmap,    // 元画像 (W×H ARGB_8888)
+    jobject aiEnhancedBitmap,  // AI結果を元サイズにリサイズ済み (W×H ARGB_8888)
+    jobject aiLowResBitmap     // AI入力の低解像度版 (lrW×lrH ARGB_8888)
+)
+```
+
+処理内容:
+1. 3つのBitmapからピクセルデータを取得 (lockPixels, stride考慮コピー, unlockPixels)
+2. 出力バッファを確保
+3. `ImageFusion::fusionPipeline()` を呼び出し
+4. 結果から新しいBitmap (W×H ARGB_8888) を作成して返す
+5. 失敗時は nullptr を返す
+
+### ファイル4: `app/src/main/jni/CMakeLists.txt`
+
+image_fusion.cpp を追加:
+
+```cmake
+cmake_minimum_required(VERSION 3.22)
+project(realesrgan_native CXX)
+set(CMAKE_CXX_STANDARD 17)
+set(ncnn_DIR "${CMAKE_SOURCE_DIR}/ncnn-android-vulkan/${ANDROID_ABI}/lib/cmake/ncnn")
+find_package(ncnn REQUIRED)
+find_library(JNIGRAPHICS_LIB jnigraphics)
+find_library(LOG_LIB log)
+find_library(ANDROID_LIB android)
+add_library(realesrgan_native SHARED
+    realesrgan_simple.cpp
+    realesrgan_jni.cpp
+    image_fusion.cpp
+)
+target_link_libraries(realesrgan_native ncnn ${JNIGRAPHICS_LIB} ${LOG_LIB} ${ANDROID_LIB})
+```
+
+### ファイル5: `app/src/main/java/com/nexus/vision/ncnn/RealEsrganBridge.kt`
+
+既存の宣言は全て残し、以下を追加:
+
+```kotlin
+// 3段融合パイプライン (Guided Filter + DWT + IBP)
+external fun nativeFusionPipeline(
+    originalBitmap: Bitmap,    // 元画像
+    aiEnhancedBitmap: Bitmap,  // AI超解像→元サイズにリサイズ
+    aiLowResBitmap: Bitmap     // AI入力の低解像度版
+): Bitmap?
+```
+
+### ファイル6: `app/src/main/java/com/nexus/vision/ncnn/NcnnSuperResolution.kt`
+
+完全に書き換え。以下の設計:
+
+```kotlin
+package com.nexus.vision.ncnn
+
+import android.content.Context
+import android.graphics.Bitmap
+import android.graphics.Canvas
+import android.graphics.Rect
+import android.util.Log
+
 class NcnnSuperResolution {
     companion object {
         private const val TAG = "NcnnSR"
-        // 軽量モデル（1.2MB、モバイル向け）
         private const val PARAM_FILE = "models/realesr-animevideov3-x4.param"
         private const val MODEL_FILE = "models/realesr-animevideov3-x4.bin"
         private const val SCALE = 4
-        // タイルサイズ32（Mali-G68で安全なサイズ）
         private const val TILE_SIZE = 32
-        // 入力上限: 4×で出力2048px → 入力512px
-        private const val MAX_INPUT_SIDE = 512
+
+        // AI超解像の入力最大サイズ
+        private const val SR_MAX_INPUT = 512
+
+        // タイル処理パラメータ
+        private const val PROCESS_TILE = 512
+        private const val PROCESS_OVERLAP = 32
     }
 
     private var initialized = false
 
     fun initialize(context: Context): Boolean {
-        if (initialized && RealEsrganBridge.nativeIsLoaded()) return true
-        return try {
-            val result = RealEsrganBridge.nativeInit(
-                context.assets, PARAM_FILE, MODEL_FILE, SCALE, TILE_SIZE
-            )
-            initialized = result
-            if (result) Log.i(TAG, "Initialized (Vulkan GPU + FP16, tile=$TILE_SIZE)")
-            else Log.e(TAG, "Init failed")
-            result
-        } catch (e: Exception) {
-            Log.e(TAG, "Init error: ${e.message}")
-            false
+        // 既存と同じ
+    }
+
+    /**
+     * メイン超解像メソッド
+     * ≤512px: 直接4× SR
+     * >512px: タイル方式 3段融合パイプライン (出力=入力と同サイズ)
+     */
+    suspend fun upscale(bitmap: Bitmap): Bitmap? {
+        if (!initialized || !RealEsrganBridge.nativeIsLoaded()) return null
+        val maxSide = maxOf(bitmap.width, bitmap.height)
+        return if (maxSide <= SR_MAX_INPUT) {
+            processSuperResolution(bitmap)
+        } else {
+            processTiledFusionPipeline(bitmap)
         }
     }
 
-    suspend fun upscale(bitmap: Bitmap): Bitmap? {
-        if (!initialized || !RealEsrganBridge.nativeIsLoaded()) {
-            Log.e(TAG, "Model not loaded")
+    /**
+     * タイル方式3段融合パイプライン
+     * 各タイル(512×512)ごとに:
+     *   1. origTile = 元解像度タイル切り出し
+     *   2. srInput = origTile を ≤512に縮小
+     *   3. aiResult = nativeProcess(srInput) → 4×拡大
+     *   4. aiUpscaled = aiResult を origTile サイズにリサイズ
+     *   5. result = nativeFusionPipeline(origTile, aiUpscaled, srInput)
+     *   6. 出力キャンバスに書き込み
+     */
+    private fun processTiledFusionPipeline(bitmap: Bitmap): Bitmap? {
+        val w = bitmap.width
+        val h = bitmap.height
+        val startTime = System.currentTimeMillis()
+        val original = ensureArgb(bitmap) ?: return null
+
+        val output = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
+        val canvas = Canvas(output)
+
+        val step = PROCESS_TILE - PROCESS_OVERLAP
+        val tilesX = (w + step - 1) / step
+        val tilesY = (h + step - 1) / step
+        val totalTiles = tilesX * tilesY
+
+        Log.i(TAG, "Fusion pipeline: ${w}x${h}, tiles=$totalTiles")
+
+        var processed = 0
+        var successCount = 0
+
+        for (ty in 0 until tilesY) {
+            for (tx in 0 until tilesX) {
+                val srcLeft = (tx * step).coerceAtMost(w - 1)
+                val srcTop = (ty * step).coerceAtMost(h - 1)
+                val srcRight = (srcLeft + PROCESS_TILE).coerceAtMost(w)
+                val srcBottom = (srcTop + PROCESS_TILE).coerceAtMost(h)
+                val tileW = srcRight - srcLeft
+                val tileH = srcBottom - srcTop
+                if (tileW < 16 || tileH < 16) continue
+
+                val origTile = Bitmap.createBitmap(original, srcLeft, srcTop, tileW, tileH)
+                val processedTile = processOneTileFusion(origTile)
+
+                if (processedTile != null) {
+                    canvas.drawBitmap(processedTile, null,
+                        Rect(srcLeft, srcTop, srcRight, srcBottom), null)
+                    processedTile.recycle()
+                    successCount++
+                } else {
+                    canvas.drawBitmap(origTile, null,
+                        Rect(srcLeft, srcTop, srcRight, srcBottom), null)
+                }
+                origTile.recycle()
+
+                processed++
+                if (processed % 4 == 0 || processed == totalTiles) {
+                    Log.i(TAG, "Progress: $processed/$totalTiles")
+                }
+            }
+        }
+
+        if (original !== bitmap) original.recycle()
+        val elapsed = System.currentTimeMillis() - startTime
+        Log.i(TAG, "Fusion done: ${w}x${h}, $successCount/$totalTiles tiles, ${elapsed}ms")
+        return output
+    }
+
+    /**
+     * 1タイルの3段融合処理
+     */
+    private fun processOneTileFusion(origTile: Bitmap): Bitmap? {
+        val tileW = origTile.width
+        val tileH = origTile.height
+
+        // Step 1: 縮小してAI入力を作る
+        val srInput = limitSize(origTile, SR_MAX_INPUT)
+        val srArgb = ensureArgb(srInput) ?: return null
+
+        // Step 2: AI 4× 超解像
+        val aiResult = RealEsrganBridge.nativeProcess(srArgb)
+        if (aiResult == null) {
+            if (srArgb !== srInput) srArgb.recycle()
+            if (srInput !== origTile) srInput.recycle()
             return null
         }
-        return try {
-            val input = limitSize(bitmap)
-            val argbInput = if (input.config != Bitmap.Config.ARGB_8888) {
-                input.copy(Bitmap.Config.ARGB_8888, false).also {
-                    if (input !== bitmap) input.recycle()
-                }
-            } else {
-                input
-            }
 
-            if (argbInput == null) {
-                Log.e(TAG, "ARGB copy failed")
-                return null
-            }
-
-            Log.i(TAG, "SR: ${argbInput.width}x${argbInput.height} -> ${argbInput.width * SCALE}x${argbInput.height * SCALE}")
-            val startTime = System.currentTimeMillis()
-            val result = RealEsrganBridge.nativeProcess(argbInput)
-            val elapsed = System.currentTimeMillis() - startTime
-
-            if (result != null) {
-                Log.i(TAG, "SR done: ${result.width}x${result.height} in ${elapsed}ms")
-            } else {
-                Log.e(TAG, "nativeProcess returned null (${elapsed}ms)")
-            }
-
-            if (argbInput !== bitmap && argbInput !== input) argbInput.recycle()
-            if (input !== bitmap) input.recycle()
-
-            result
-        } catch (e: Exception) {
-            Log.e(TAG, "SR error: ${e.message}")
-            null
+        // Step 3: AI結果を元タイルサイズにリサイズ
+        val aiUpscaled = if (aiResult.width != tileW || aiResult.height != tileH) {
+            val scaled = Bitmap.createScaledBitmap(aiResult, tileW, tileH, true)
+            aiResult.recycle()
+            ensureArgb(scaled) ?: return null
+        } else {
+            ensureArgb(aiResult) ?: return null
         }
+
+        // Step 4: nativeFusionPipeline(origTile, aiUpscaled, srArgb)
+        //   srArgb = AI入力 (低解像度版) → IBP のリファレンス
+        val origArgb = ensureArgb(origTile) ?: run {
+            aiUpscaled.recycle()
+            srArgb.recycle()
+            return null
+        }
+
+        val fused = RealEsrganBridge.nativeFusionPipeline(origArgb, aiUpscaled, srArgb)
+
+        // クリーンアップ
+        if (origArgb !== origTile) origArgb.recycle()
+        aiUpscaled.recycle()
+        if (srArgb !== srInput) srArgb.recycle()
+        if (srInput !== origTile) srInput.recycle()
+
+        return fused
+    }
+
+    // processSuperResolution, release, ensureArgb, limitSize は既存と同じ
+    private fun processSuperResolution(bitmap: Bitmap): Bitmap? {
+        val argb = ensureArgb(bitmap) ?: return null
+        Log.i(TAG, "SR: ${argb.width}x${argb.height} -> ${argb.width*SCALE}x${argb.height*SCALE}")
+        val result = RealEsrganBridge.nativeProcess(argb)
+        if (argb !== bitmap) argb.recycle()
+        return result
     }
 
     fun release() {
-        try { RealEsrganBridge.nativeRelease() } catch (e: Exception) { Log.e(TAG, "Release: ${e.message}") }
+        RealEsrganBridge.nativeRelease()
         initialized = false
     }
 
-    private fun limitSize(bitmap: Bitmap): Bitmap {
-        val maxSide = maxOf(bitmap.width, bitmap.height)
-        if (maxSide <= MAX_INPUT_SIDE) return bitmap
-        val ratio = MAX_INPUT_SIDE.toFloat() / maxSide
+    private fun ensureArgb(bitmap: Bitmap): Bitmap? {
+        return if (bitmap.config != Bitmap.Config.ARGB_8888) {
+            bitmap.copy(Bitmap.Config.ARGB_8888, false)
+        } else bitmap
+    }
+
+    private fun limitSize(bitmap: Bitmap, maxSide: Int): Bitmap {
+        val max = maxOf(bitmap.width, bitmap.height)
+        if (max <= maxSide) return bitmap
+        val ratio = maxSide.toFloat() / max
         val newW = (bitmap.width * ratio).toInt().coerceAtLeast(16)
         val newH = (bitmap.height * ratio).toInt().coerceAtLeast(16)
-        Log.i(TAG, "Limit: ${bitmap.width}x${bitmap.height} -> ${newW}x${newH}")
         return Bitmap.createScaledBitmap(bitmap, newW, newH, true)
     }
 }
 ```
 
+## 出力フォーマット
+
+各ファイルについて:
+1. ファイルパスをコメントで先頭に記述
+2. 完全なコードを出力（省略なし）
+3. 全てのインクルード/インポートを含める
+4. Android NDK の制約を守る（-fno-exceptions: try-catchなし）
+5. ログ出力を適切に含める（各Stageの開始/完了/時間）
+
+全6ファイルの完全なコードを出力してください。
+````
+
 ---
 
-**変更まとめ：**
+## プロンプトの補足説明
 
-| 対策 | 実装 |
-|---|---|
-| Vulkan GPU復活 | `ncnn-android-vulkan.zip` + `use_vulkan_compute=true` |
-| FP16フル活用 | `fp16_packed/storage/arithmetic` 全ON → メモリ半減 |
-| 軽量モデル | `animevideov3`（1.2MB、RRDB少ない） |
-| タイルサイズ32 | 1タイルの必要メモリを最小化 |
-| スレッド1 | GPU使用時はCPUスレッド1で十分 |
-| 入力512px制限 | 出力最大2048px、メモリ16MB |
-| タイル失敗時フォールバック | nearest-neighborで埋めてクラッシュ回避 |
-| C++バッファ確保try-catch | OOM時nullptr返却 |
-| Java OOMチェック | `ExceptionCheck`でBitmap作成失敗を検知 |
+このプロンプトが正確に動作する理由を以下にまとめます。
 
-**変更ファイル一覧：**
+**既存コードとの接続点が明確**
 
-| ファイル | 操作 |
-|---|---|
-| `jni/CMakeLists.txt` | 置換（Vulkan版パス） |
-| `jni/realesrgan_simple.h` | 置換（gpuidコンストラクタ） |
-| `jni/realesrgan_simple.cpp` | 置換（Vulkan対応） |
-| `jni/realesrgan_jni.cpp` | 置換（GPU初期化/破棄） |
-| `ncnn/NcnnSuperResolution.kt` | 置換（tile=32, limit=512） |
+NcnnSuperResolution.kt の `upscale()` メソッドのシグネチャ（`Bitmap → Bitmap?`）は変わりません。RouteCProcessor.kt がこのメソッドを呼び出す部分もそのまま動きます。MainViewModel.kt も変更不要です。変更の影響範囲を最小化し、C++ 層に新しい `image_fusion.cpp` を追加して JNI 経由で繋ぐだけの設計です。
 
-ncnnライブラリを `ncnn-android-vulkan` に差し替えてからリビルドしてください。`RouteCProcessor.kt`、`MainViewModel.kt`、`MainScreen.kt`、`CropSelector.kt`、`RegionDecoder.kt` は変更不要です。
+**メモリ安全性の根拠**
+
+タイル 512×512 の場合の各Stage のピーク使用量を計算すると、Guided Filter では サブサンプリング後 128×128 の float バッファ 6本（meanI, meanP, corrI, corrIP, a, b）で約 400KB。DWT では 512×512 の float バッファ 6本（2画像×3ch）で約 6MB。IBP では 512×512 と 128×128 の float バッファ各3本で約 3.2MB。fusionPipeline 全体のピークは約 10MB 以下であり、DOOGEE S200 の 6GB RAM で十分余裕があります。
+
+**数学的正確性**
+
+Guided Filter は He & Sun (TPAMI 2013, arXiv 1505.00996) の Algorithm 2 に完全準拠しています。Haar DWT は標準的な行→列の分離型実装で、融合ルールは IEEE の画像融合研究で広く使われる max-absolute-value 選択法です。IBP は Irani & Peleg (1991) の古典的手法で、2回反復・λ=0.2 は収束と品質のバランスが取れた設定です。
+
+**`-fno-exceptions` 対応**
+
+プロンプト内で明示的に「try-catch は絶対に使わない」と指定しています。全てのエラーは return 値（0=成功, 負値=失敗）で処理し、呼び出し側で分岐します。

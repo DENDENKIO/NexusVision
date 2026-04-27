@@ -33,4 +33,11 @@ object RealEsrganBridge {
     external fun nativeRelease()
 
     external fun nativeIsLoaded(): Boolean
+
+    // 3段融合パイプライン (Guided Filter + DWT + IBP)
+    external fun nativeFusionPipeline(
+        originalBitmap: Bitmap,    // 元画像
+        aiEnhancedBitmap: Bitmap,  // AI超解像→元サイズにリサイズ
+        aiLowResBitmap: Bitmap     // AI入力の低解像度版
+    ): Bitmap?
 }

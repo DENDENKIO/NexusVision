@@ -15,14 +15,11 @@ class NcnnSuperResolution {
         private const val SCALE = 4
         private const val TILE_SIZE = 32
 
+        // AI超解像の入力最大サイズ
         private const val SR_MAX_INPUT = 512
-        private const val DETAIL_STRENGTH = 1.2f
-        private const val SHARPEN_STRENGTH = 0.4f
 
-        // 処理タイルサイズ（元画像から切り出す1タイルの辺）
-        // 512px のタイルなら AI処理可能、かつメモリ安全
+        // タイル処理パラメータ
         private const val PROCESS_TILE = 512
-        // タイル重なり（継ぎ目防止）
         private const val PROCESS_OVERLAP = 32
     }
 
@@ -45,49 +42,42 @@ class NcnnSuperResolution {
     }
 
     /**
-     * 超解像パイプライン
-     * 小画像(≤512px): 4×拡大
-     * 大画像(>512px): タイル方式ラプラシアン合成（出力＝入力と同サイズ）
+     * メイン超解像メソッド
+     * ≤512px: 直接4× SR
+     * >512px: タイル方式 3段融合パイプライン (出力=入力と同サイズ)
      */
     suspend fun upscale(bitmap: Bitmap): Bitmap? {
         if (!initialized || !RealEsrganBridge.nativeIsLoaded()) {
             Log.e(TAG, "Model not loaded")
             return null
         }
-
         val maxSide = maxOf(bitmap.width, bitmap.height)
-
         return if (maxSide <= SR_MAX_INPUT) {
             Log.i(TAG, "Small image: direct 4x SR")
             processSuperResolution(bitmap)
         } else {
-            Log.i(TAG, "Large image: tiled Laplacian SR")
-            processTiledLaplacianSR(bitmap)
+            Log.i(TAG, "Large image: Guided+DWT+IBP fusion pipeline")
+            processTiledFusionPipeline(bitmap)
         }
     }
 
     /**
-     * タイル方式ラプラシアン合成
-     *
-     * 入力Bitmap全体を PROCESS_TILE サイズのタイルに分割し、
-     * 各タイルごとに:
-     *   1. タイルを切り出し（元解像度のピクセル＝鮮明な高周波ソース）
-     *   2. タイルを縮小 → AI超解像 → 元タイルサイズにアップスケール
-     *   3. ラプラシアン合成（元タイルの高周波 + AIの低周波）
-     *   4. 出力キャンバスに書き込み
-     *
-     * 出力サイズ ＝ 入力サイズ（縮小しない）
-     * 1タイルずつ処理するのでメモリは常に安全
+     * タイル方式3段融合パイプライン
+     * 各タイル(512×512)ごとに:
+     *   1. origTile = 元解像度タイル切り出し
+     *   2. srInput = origTile を ≤512に縮小
+     *   3. aiResult = nativeProcess(srInput) → 4×拡大
+     *   4. aiUpscaled = aiResult を origTile サイズにリサイズ
+     *   5. result = nativeFusionPipeline(origTile, aiUpscaled, srInput)
+     *   6. 出力キャンバスに書き込み
      */
-    private fun processTiledLaplacianSR(bitmap: Bitmap): Bitmap? {
+    private fun processTiledFusionPipeline(bitmap: Bitmap): Bitmap? {
         return try {
             val w = bitmap.width
             val h = bitmap.height
             val startTime = System.currentTimeMillis()
-
             val original = ensureArgb(bitmap) ?: return null
 
-            // 出力キャンバス（入力と同サイズ）
             val output = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
             val canvas = Canvas(output)
 
@@ -96,10 +86,10 @@ class NcnnSuperResolution {
             val tilesY = (h + step - 1) / step
             val totalTiles = tilesX * tilesY
 
-            Log.i(TAG, "Tiled Laplacian: ${w}x${h}, tiles=${tilesX}x${tilesY}=$totalTiles, tileSize=$PROCESS_TILE, overlap=$PROCESS_OVERLAP")
+            Log.i(TAG, "Fusion pipeline: ${w}x${h}, tiles=$totalTiles")
 
             var processed = 0
-            var aiSuccessCount = 0
+            var successCount = 0
 
             for (ty in 0 until tilesY) {
                 for (tx in 0 until tilesX) {
@@ -109,22 +99,17 @@ class NcnnSuperResolution {
                     val srcBottom = (srcTop + PROCESS_TILE).coerceAtMost(h)
                     val tileW = srcRight - srcLeft
                     val tileH = srcBottom - srcTop
-
                     if (tileW < 16 || tileH < 16) continue
 
-                    // 元解像度タイルを切り出し
                     val origTile = Bitmap.createBitmap(original, srcLeft, srcTop, tileW, tileH)
-
-                    // このタイルを処理
-                    val processedTile = processOneTile(origTile)
+                    val processedTile = processOneTileFusion(origTile)
 
                     if (processedTile != null) {
                         canvas.drawBitmap(processedTile, null,
                             Rect(srcLeft, srcTop, srcRight, srcBottom), null)
                         processedTile.recycle()
-                        aiSuccessCount++
+                        successCount++
                     } else {
-                        // 失敗時は元タイルをそのまま書き込み
                         canvas.drawBitmap(origTile, null,
                             Rect(srcLeft, srcTop, srcRight, srcBottom), null)
                     }
@@ -132,65 +117,70 @@ class NcnnSuperResolution {
 
                     processed++
                     if (processed % 4 == 0 || processed == totalTiles) {
-                        Log.i(TAG, "Tiled progress: $processed/$totalTiles (${(processed * 100.0 / totalTiles).toInt()}%)")
+                        Log.i(TAG, "Progress: $processed/$totalTiles")
                     }
                 }
             }
 
             if (original !== bitmap) original.recycle()
-
             val elapsed = System.currentTimeMillis() - startTime
-            Log.i(TAG, "Tiled Laplacian done: ${w}x${h}, ${totalTiles} tiles, AI success=$aiSuccessCount, ${elapsed}ms")
+            Log.i(TAG, "Fusion done: ${w}x${h}, $successCount/$totalTiles tiles, ${elapsed}ms")
             output
         } catch (e: Exception) {
-            Log.e(TAG, "Tiled Laplacian error: ${e.message}")
+            Log.e(TAG, "Fusion pipeline error: ${e.message}")
             null
         }
     }
 
     /**
-     * 1タイルの処理:
-     * 1. タイル(例512×512)をSR_MAX_INPUT以下に縮小
-     * 2. AI 4×超解像
-     * 3. AI結果をタイルサイズにアップスケール
-     * 4. ラプラシアン合成
+     * 1タイルの3段融合処理
      */
-    private fun processOneTile(origTile: Bitmap): Bitmap? {
+    private fun processOneTileFusion(origTile: Bitmap): Bitmap? {
         return try {
             val tileW = origTile.width
             val tileH = origTile.height
 
-            // 縮小 → AI超解像
+            // Step 1: 縮小してAI入力を作る
             val srInput = limitSize(origTile, SR_MAX_INPUT)
             val srArgb = ensureArgb(srInput) ?: return null
 
+            // Step 2: AI 4× 超解像
             val aiResult = RealEsrganBridge.nativeProcess(srArgb)
-            if (srArgb !== srInput) srArgb.recycle()
-            if (srInput !== origTile) srInput.recycle()
+            if (aiResult == null) {
+                if (srArgb !== srInput) srArgb.recycle()
+                if (srInput !== origTile) srInput.recycle()
+                return null
+            }
 
-            if (aiResult == null) return null
-
-            // AI結果を元タイルサイズにアップスケール
+            // Step 3: AI結果を元タイルサイズにリサイズ
             val aiUpscaled = if (aiResult.width != tileW || aiResult.height != tileH) {
                 val scaled = Bitmap.createScaledBitmap(aiResult, tileW, tileH, true)
                 aiResult.recycle()
-                scaled
+                ensureArgb(scaled) ?: return null
             } else {
-                aiResult
+                ensureArgb(aiResult) ?: return null
             }
 
-            val aiArgb = ensureArgb(aiUpscaled) ?: return null
-            if (aiUpscaled !== aiArgb) aiUpscaled.recycle()
+            // Step 4: nativeFusionPipeline(origTile, aiUpscaled, srArgb)
+            //   srArgb = AI入力 (低解像度版) → IBP のリファレンス
+            val origArgb = ensureArgb(origTile) ?: run {
+                aiUpscaled.recycle()
+                if (srArgb !== srInput) srArgb.recycle()
+                if (srInput !== origTile) srInput.recycle()
+                return null
+            }
 
-            // ラプラシアン合成
-            val blended = RealEsrganBridge.nativeLaplacianBlend(
-                origTile, aiArgb, DETAIL_STRENGTH, SHARPEN_STRENGTH
-            )
-            aiArgb.recycle()
+            val fused = RealEsrganBridge.nativeFusionPipeline(origArgb, aiUpscaled, srArgb)
 
-            blended
+            // クリーンアップ
+            if (origArgb !== origTile) origArgb.recycle()
+            aiUpscaled.recycle()
+            if (srArgb !== srInput) srArgb.recycle()
+            if (srInput !== origTile) srInput.recycle()
+
+            fused
         } catch (e: Exception) {
-            Log.e(TAG, "Tile process error: ${e.message}")
+            Log.e(TAG, "Tile fusion error: ${e.message}")
             null
         }
     }

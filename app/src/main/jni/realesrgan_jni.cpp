@@ -8,6 +8,7 @@
 #include <string>
 #include <vector>
 #include "realesrgan_simple.h"
+#include "image_fusion.h"
 #include "gpu.h"
 
 #define TAG "RealESRGAN_JNI"
@@ -380,6 +381,119 @@ JNIEXPORT jboolean JNICALL
 Java_com_nexus_vision_ncnn_RealEsrganBridge_nativeIsLoaded(
     JNIEnv* env, jclass clazz) {
     return (g_realesrgan && g_realesrgan->isLoaded()) ? JNI_TRUE : JNI_FALSE;
+}
+
+JNIEXPORT jobject JNICALL
+Java_com_nexus_vision_ncnn_RealEsrganBridge_nativeFusionPipeline(
+    JNIEnv* env, jclass clazz,
+    jobject originalBitmap,
+    jobject aiEnhancedBitmap,
+    jobject aiLowResBitmap) {
+
+    AndroidBitmapInfo oInfo, eInfo, lInfo;
+    if (AndroidBitmap_getInfo(env, originalBitmap, &oInfo) != 0 ||
+        AndroidBitmap_getInfo(env, aiEnhancedBitmap, &eInfo) != 0 ||
+        AndroidBitmap_getInfo(env, aiLowResBitmap, &lInfo) != 0) {
+        LOGE("FusionPipeline: failed to get bitmap info");
+        return nullptr;
+    }
+
+    if (oInfo.format != ANDROID_BITMAP_FORMAT_RGBA_8888 ||
+        eInfo.format != ANDROID_BITMAP_FORMAT_RGBA_8888 ||
+        lInfo.format != ANDROID_BITMAP_FORMAT_RGBA_8888) {
+        LOGE("FusionPipeline: unsupported format");
+        return nullptr;
+    }
+
+    int w = (int)oInfo.width;
+    int h = (int)oInfo.height;
+    int lrW = (int)lInfo.width;
+    int lrH = (int)lInfo.height;
+
+    if (w != (int)eInfo.width || h != (int)eInfo.height) {
+        LOGE("FusionPipeline: size mismatch orig=%dx%d vs enhanced=%dx%d",
+             w, h, (int)eInfo.width, (int)eInfo.height);
+        return nullptr;
+    }
+
+    LOGI("FusionPipeline: orig=%dx%d, lowRes=%dx%d", w, h, lrW, lrH);
+
+    // 元画像ピクセル取得
+    void* oPixels = nullptr;
+    AndroidBitmap_lockPixels(env, originalBitmap, &oPixels);
+    std::vector<unsigned char> origData((size_t)w * h * 4);
+    for (int row = 0; row < h; row++) {
+        memcpy(origData.data() + row * w * 4,
+               (unsigned char*)oPixels + row * oInfo.stride, w * 4);
+    }
+    AndroidBitmap_unlockPixels(env, originalBitmap);
+
+    // AI enhanced ピクセル取得
+    void* ePixels = nullptr;
+    AndroidBitmap_lockPixels(env, aiEnhancedBitmap, &ePixels);
+    std::vector<unsigned char> enhData((size_t)w * h * 4);
+    for (int row = 0; row < h; row++) {
+        memcpy(enhData.data() + row * w * 4,
+               (unsigned char*)ePixels + row * eInfo.stride, w * 4);
+    }
+    AndroidBitmap_unlockPixels(env, aiEnhancedBitmap);
+
+    // AI low-res ピクセル取得
+    void* lPixels = nullptr;
+    AndroidBitmap_lockPixels(env, aiLowResBitmap, &lPixels);
+    std::vector<unsigned char> lowData((size_t)lrW * lrH * 4);
+    for (int row = 0; row < lrH; row++) {
+        memcpy(lowData.data() + row * lrW * 4,
+               (unsigned char*)lPixels + row * lInfo.stride, lrW * 4);
+    }
+    AndroidBitmap_unlockPixels(env, aiLowResBitmap);
+
+    // 出力バッファ
+    std::vector<unsigned char> outputData((size_t)w * h * 4);
+
+    int ret = ImageFusion::fusionPipeline(
+        origData.data(), enhData.data(), w, h,
+        lowData.data(), lrW, lrH, outputData.data());
+
+    origData.clear(); origData.shrink_to_fit();
+    enhData.clear(); enhData.shrink_to_fit();
+    lowData.clear(); lowData.shrink_to_fit();
+
+    if (ret != 0) {
+        LOGE("FusionPipeline: native fusion failed: %d", ret);
+        return nullptr;
+    }
+
+    // 出力Bitmap作成
+    jclass bitmapClass = env->FindClass("android/graphics/Bitmap");
+    jclass configClass = env->FindClass("android/graphics/Bitmap$Config");
+    jfieldID argb8888Field = env->GetStaticFieldID(configClass, "ARGB_8888",
+                                                     "Landroid/graphics/Bitmap$Config;");
+    jobject argb8888 = env->GetStaticObjectField(configClass, argb8888Field);
+    jmethodID createMethod = env->GetStaticMethodID(bitmapClass, "createBitmap",
+        "(IILandroid/graphics/Bitmap$Config;)Landroid/graphics/Bitmap;");
+    jobject outBitmap = env->CallStaticObjectMethod(bitmapClass, createMethod, w, h, argb8888);
+
+    if (env->ExceptionCheck()) {
+        env->ExceptionDescribe();
+        env->ExceptionClear();
+        LOGE("FusionPipeline: OOM creating bitmap %dx%d", w, h);
+        return nullptr;
+    }
+    if (!outBitmap) return nullptr;
+
+    AndroidBitmapInfo outInfo;
+    AndroidBitmap_getInfo(env, outBitmap, &outInfo);
+    void* outPtr = nullptr;
+    AndroidBitmap_lockPixels(env, outBitmap, &outPtr);
+    for (int row = 0; row < h; row++) {
+        memcpy((unsigned char*)outPtr + row * outInfo.stride,
+               outputData.data() + row * w * 4, w * 4);
+    }
+    AndroidBitmap_unlockPixels(env, outBitmap);
+
+    LOGI("FusionPipeline output: %dx%d", w, h);
+    return outBitmap;
 }
 
 } // extern "C"
