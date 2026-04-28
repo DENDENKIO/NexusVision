@@ -1,5 +1,4 @@
 // ファイルパス: app/src/main/java/com/nexus/vision/ui/MainScreen.kt
-
 package com.nexus.vision.ui
 
 import androidx.compose.foundation.background
@@ -43,6 +42,7 @@ import com.nexus.vision.ui.components.CropSelector
 fun MainScreen(
     viewModel: MainViewModel = viewModel(),
     onPickImage: () -> Unit = {},
+    onPickFile: () -> Unit = {},
     onPickMultipleImages: () -> Unit = {},
     onImageSelected: ((android.net.Uri) -> Unit) -> Unit = {},
     onMultipleImagesSelected: ((List<android.net.Uri>) -> Unit) -> Unit = {}
@@ -59,7 +59,6 @@ fun MainScreen(
         }
     }
 
-    // バッチピッカーのリクエスト監視
     LaunchedEffect(uiState.requestBatchPicker) {
         if (uiState.requestBatchPicker) {
             viewModel.consumeBatchPickerRequest()
@@ -100,7 +99,6 @@ fun MainScreen(
             ) {
                 HorizontalDivider()
 
-                // バッチ進捗表示
                 if (uiState.isBatchRunning && uiState.batchProgressText.isNotEmpty()) {
                     Box(
                         modifier = Modifier
@@ -116,7 +114,6 @@ fun MainScreen(
                     }
                 }
 
-                // 範囲選択モード中はクロップUIを表示
                 if (uiState.cropMode && uiState.cropThumbnail != null) {
                     val (confirmLabel, headerLabel) = when (uiState.cropPurpose) {
                         CropPurpose.ENHANCE -> "この範囲を高画質化" to "高画質化したい範囲をドラッグで選択"
@@ -140,6 +137,7 @@ fun MainScreen(
                         onTextChange = { viewModel.updateInputText(it) },
                         selectedImageUri = uiState.selectedImageUri,
                         onPickImage = onPickImage,
+                        onPickFile = onPickFile,
                         onClearImage = { viewModel.clearSelectedImage() },
                         onSend = { viewModel.sendMessage() },
                         isEnabled = !uiState.isProcessing

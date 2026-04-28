@@ -9,14 +9,8 @@ import org.json.JSONArray
 /**
  * NexusSheets インデックス管理
  *
- * 機能:
- *   - ファイル登録（CSV/XLSX/PDF のパース結果を行単位で保存）
- *   - 全文検索（複数ファイル横断）
- *   - 行指定取得 / 列指定取得
- *   - 行列クロス検索（行キーワードと列名の交差値を取得）
- *   - ファイル一覧 / 削除
- *
  * Phase 8.5: NexusSheets
+ * Phase 8.6: 高度検索（列フィルタ、複数条件AND、列値行抽出）
  */
 class NexusSheetsIndex(boxStore: BoxStore) {
 
@@ -30,11 +24,6 @@ class NexusSheetsIndex(boxStore: BoxStore) {
 
     // ── ファイル登録 ──
 
-    /**
-     * CSV/XLSX パース結果をインデックスに登録する。
-     * rows: List<List<String>> — 最初の行をヘッダーとみなす。
-     * 戻り値: 登録された IndexedFile の id。
-     */
     fun addParsedTable(
         rows: List<List<String>>,
         fileName: String,
@@ -42,12 +31,10 @@ class NexusSheetsIndex(boxStore: BoxStore) {
     ): Long {
         if (rows.isEmpty()) return -1
 
-        // 同名ファイルが既にある場合は削除して再登録
         removeByFileName(fileName)
 
         val headers = rows.first()
         val headerJson = JSONArray(headers).toString()
-
         val colCount = rows.maxOf { it.size }
 
         val file = IndexedFile(
@@ -62,7 +49,6 @@ class NexusSheetsIndex(boxStore: BoxStore) {
         fileBox.put(file)
         val fileId = file.id
 
-        // 行データを一括登録
         val indexedRows = rows.mapIndexed { index, cells ->
             val cellsJsonStr = JSONArray(cells).toString()
             val searchStr = cells.joinToString(" ")
@@ -79,18 +65,10 @@ class NexusSheetsIndex(boxStore: BoxStore) {
         return fileId
     }
 
-    /**
-     * PDF パース結果をインデックスに登録する。
-     * 各ページのテキストを段落（改行区切り）ごとに行として保存。
-     */
-    fun addPdfText(
-        pages: List<String>,    // ページごとのテキスト
-        fileName: String
-    ): Long {
+    fun addPdfText(pages: List<String>, fileName: String): Long {
         removeByFileName(fileName)
 
         val allLines = mutableListOf<List<String>>()
-        // ヘッダー行
         allLines.add(listOf("ページ", "内容"))
 
         for ((pageIdx, pageText) in pages.withIndex()) {
@@ -128,33 +106,23 @@ class NexusSheetsIndex(boxStore: BoxStore) {
 
     // ── 検索 ──
 
-    /**
-     * 全ファイル横断でキーワード検索する。
-     * 複数キーワードはスペース区切りで AND 検索。
-     * 戻り値: SearchResult のリスト（ファイル名・行番号・セルデータ付き）
-     */
     fun search(query: String): List<SearchResult> {
         val keywords = query.trim().split("\\s+".toRegex()).filter { it.isNotBlank() }
         if (keywords.isEmpty()) return emptyList()
 
-        // 最初のキーワードで ObjectBox クエリ
         val firstKeyword = keywords.first()
         val candidates = rowBox.query(
             IndexedRow_.searchText.contains(firstKeyword, io.objectbox.query.QueryBuilder.StringOrder.CASE_INSENSITIVE)
         ).build().find()
 
-        // 残りのキーワードで Kotlin 側フィルタ（AND）
         val filtered = if (keywords.size > 1) {
             candidates.filter { row ->
-                keywords.all { kw ->
-                    row.searchText.contains(kw, ignoreCase = true)
-                }
+                keywords.all { kw -> row.searchText.contains(kw, ignoreCase = true) }
             }
         } else {
             candidates
         }
 
-        // ファイル情報を付与して返す（上限 MAX_SEARCH_RESULTS）
         val fileCache = mutableMapOf<Long, IndexedFile?>()
         return filtered.take(MAX_SEARCH_RESULTS).mapNotNull { row ->
             val file = fileCache.getOrPut(row.fileId) { fileBox.get(row.fileId) }
@@ -171,22 +139,20 @@ class NexusSheetsIndex(boxStore: BoxStore) {
         }
     }
 
-    /**
-     * 行列クロス検索:
-     * rowKeyword に一致する行を探し、colName に一致する列の値を返す。
-     * 例: rowKeyword="東京", colName="売上" → 東京の行の売上列の値
-     *
-     * targetFileId が指定された場合はそのファイルのみ検索。
-     * 0 の場合は全ファイル横断。
-     */
-    fun crossLookup(
-        rowKeyword: String,
-        colName: String,
-        targetFileId: Long = 0
-    ): List<CrossResult> {
-        val results = mutableListOf<CrossResult>()
+    // ── 列名指定フィルタ ──
 
-        // 対象ファイルの決定
+    /**
+     * 特定の列に特定の値を含む行を抽出する。
+     * 例: colName="地域", value="東京" → 地域列に「東京」を含む全行を返す
+     * targetFileId=0 なら全ファイル横断
+     */
+    fun filterByColumn(
+        colName: String,
+        value: String,
+        targetFileId: Long = 0
+    ): List<SearchResult> {
+        val results = mutableListOf<SearchResult>()
+
         val files = if (targetFileId > 0) {
             listOfNotNull(fileBox.get(targetFileId))
         } else {
@@ -195,18 +161,183 @@ class NexusSheetsIndex(boxStore: BoxStore) {
 
         for (file in files) {
             val headers = parseCellsJson(file.headerJson)
-            // 列名を検索（部分一致）
             val colIndex = headers.indexOfFirst { it.contains(colName, ignoreCase = true) }
             if (colIndex < 0) continue
 
-            // その fileId の行でキーワードに一致するものを検索
+            // まず searchText で value を含む行を絞り込み
+            val candidates = rowBox.query(
+                IndexedRow_.fileId.equal(file.id)
+                    .and(IndexedRow_.searchText.contains(value, io.objectbox.query.QueryBuilder.StringOrder.CASE_INSENSITIVE))
+            ).build().find()
+
+            for (row in candidates) {
+                if (row.rowIndex == 0) continue // ヘッダースキップ
+                val cells = parseCellsJson(row.cellsJson)
+                val cellValue = cells.getOrElse(colIndex) { "" }
+                // 指定列に value が含まれるか厳密チェック
+                if (cellValue.contains(value, ignoreCase = true)) {
+                    results.add(
+                        SearchResult(
+                            fileName = file.fileName,
+                            fileId = row.fileId,
+                            rowIndex = row.rowIndex,
+                            cells = cells,
+                            headers = headers
+                        )
+                    )
+                }
+            }
+        }
+
+        return results.take(MAX_SEARCH_RESULTS)
+    }
+
+    /**
+     * 複数条件 AND フィルタ:
+     * 例: conditions = [("地域","東京"), ("年度","2024")]
+     * → 地域列に「東京」AND 年度列に「2024」を含む行
+     */
+    fun multiColumnFilter(
+        conditions: List<Pair<String, String>>,
+        targetFileId: Long = 0
+    ): List<SearchResult> {
+        if (conditions.isEmpty()) return emptyList()
+
+        val files = if (targetFileId > 0) {
+            listOfNotNull(fileBox.get(targetFileId))
+        } else {
+            fileBox.all
+        }
+
+        val results = mutableListOf<SearchResult>()
+
+        for (file in files) {
+            val headers = parseCellsJson(file.headerJson)
+
+            // 各条件の列インデックスを事前に解決
+            val resolvedConditions = conditions.mapNotNull { (colName, value) ->
+                val colIndex = headers.indexOfFirst { it.contains(colName, ignoreCase = true) }
+                if (colIndex >= 0) Triple(colIndex, colName, value) else null
+            }
+
+            if (resolvedConditions.size != conditions.size) continue // 全列が見つからなければスキップ
+
+            // 最初の条件値で DB 絞り込み
+            val firstValue = resolvedConditions.first().third
+            val candidates = rowBox.query(
+                IndexedRow_.fileId.equal(file.id)
+                    .and(IndexedRow_.searchText.contains(firstValue, io.objectbox.query.QueryBuilder.StringOrder.CASE_INSENSITIVE))
+            ).build().find()
+
+            for (row in candidates) {
+                if (row.rowIndex == 0) continue
+                val cells = parseCellsJson(row.cellsJson)
+
+                // 全条件を満たすかチェック
+                val allMatch = resolvedConditions.all { (colIndex, _, value) ->
+                    val cellValue = cells.getOrElse(colIndex) { "" }
+                    cellValue.contains(value, ignoreCase = true)
+                }
+
+                if (allMatch) {
+                    results.add(
+                        SearchResult(
+                            fileName = file.fileName,
+                            fileId = row.fileId,
+                            rowIndex = row.rowIndex,
+                            cells = cells,
+                            headers = headers
+                        )
+                    )
+                }
+            }
+        }
+
+        return results.take(MAX_SEARCH_RESULTS)
+    }
+
+    /**
+     * 特定列の値でフィルタし、別の列の値のみ抽出する。
+     * 例: filterCol="地域", filterValue="東京", extractCol="売上"
+     * → 地域が東京の行から売上列の値のみ返す
+     */
+    fun filterAndExtractColumn(
+        filterCol: String,
+        filterValue: String,
+        extractCol: String,
+        targetFileId: Long = 0
+    ): List<ExtractResult> {
+        val results = mutableListOf<ExtractResult>()
+
+        val files = if (targetFileId > 0) {
+            listOfNotNull(fileBox.get(targetFileId))
+        } else {
+            fileBox.all
+        }
+
+        for (file in files) {
+            val headers = parseCellsJson(file.headerJson)
+            val filterColIndex = headers.indexOfFirst { it.contains(filterCol, ignoreCase = true) }
+            val extractColIndex = headers.indexOfFirst { it.contains(extractCol, ignoreCase = true) }
+            if (filterColIndex < 0 || extractColIndex < 0) continue
+
+            val candidates = rowBox.query(
+                IndexedRow_.fileId.equal(file.id)
+                    .and(IndexedRow_.searchText.contains(filterValue, io.objectbox.query.QueryBuilder.StringOrder.CASE_INSENSITIVE))
+            ).build().find()
+
+            for (row in candidates) {
+                if (row.rowIndex == 0) continue
+                val cells = parseCellsJson(row.cellsJson)
+                val filterCellValue = cells.getOrElse(filterColIndex) { "" }
+                if (filterCellValue.contains(filterValue, ignoreCase = true)) {
+                    val extractedValue = cells.getOrElse(extractColIndex) { "" }
+                    results.add(
+                        ExtractResult(
+                            fileName = file.fileName,
+                            rowIndex = row.rowIndex,
+                            filterCol = headers[filterColIndex],
+                            filterValue = filterCellValue,
+                            extractCol = headers[extractColIndex],
+                            extractedValue = extractedValue,
+                            fullRow = cells,
+                            headers = headers
+                        )
+                    )
+                }
+            }
+        }
+
+        return results.take(MAX_SEARCH_RESULTS)
+    }
+
+    // ── 行列クロス検索 ──
+
+    fun crossLookup(
+        rowKeyword: String,
+        colName: String,
+        targetFileId: Long = 0
+    ): List<CrossResult> {
+        val results = mutableListOf<CrossResult>()
+
+        val files = if (targetFileId > 0) {
+            listOfNotNull(fileBox.get(targetFileId))
+        } else {
+            fileBox.all
+        }
+
+        for (file in files) {
+            val headers = parseCellsJson(file.headerJson)
+            val colIndex = headers.indexOfFirst { it.contains(colName, ignoreCase = true) }
+            if (colIndex < 0) continue
+
             val matchingRows = rowBox.query(
                 IndexedRow_.fileId.equal(file.id)
                     .and(IndexedRow_.searchText.contains(rowKeyword, io.objectbox.query.QueryBuilder.StringOrder.CASE_INSENSITIVE))
             ).build().find()
 
             for (row in matchingRows) {
-                if (row.rowIndex == 0) continue // ヘッダー行はスキップ
+                if (row.rowIndex == 0) continue
                 val cells = parseCellsJson(row.cellsJson)
                 val value = cells.getOrElse(colIndex) { "" }
                 if (value.isNotBlank()) {
@@ -228,10 +359,8 @@ class NexusSheetsIndex(boxStore: BoxStore) {
         return results.take(MAX_SEARCH_RESULTS)
     }
 
-    /**
-     * 特定ファイルの特定列の全値を取得する。
-     * colName: 列ヘッダー名（部分一致）
-     */
+    // ── 列取得・集計 ──
+
     fun getColumn(fileId: Long, colName: String): ColumnResult? {
         val file = fileBox.get(fileId) ?: return null
         val headers = parseCellsJson(file.headerJson)
@@ -243,73 +372,44 @@ class NexusSheetsIndex(boxStore: BoxStore) {
             .build().find()
 
         val values = rows
-            .filter { it.rowIndex > 0 } // ヘッダー行スキップ
+            .filter { it.rowIndex > 0 }
             .map { row ->
                 val cells = parseCellsJson(row.cellsJson)
                 cells.getOrElse(colIndex) { "" }
             }
 
-        return ColumnResult(
-            fileName = file.fileName,
-            colName = headers[colIndex],
-            values = values
-        )
+        return ColumnResult(fileName = file.fileName, colName = headers[colIndex], values = values)
     }
 
-    /**
-     * 特定ファイルの特定行範囲を取得する。
-     */
     fun getRows(fileId: Long, fromRow: Int = 0, toRow: Int = Int.MAX_VALUE): List<List<String>> {
         val rows = rowBox.query(IndexedRow_.fileId.equal(fileId))
             .order(IndexedRow_.rowIndex)
             .build().find()
-
-        return rows
-            .filter { it.rowIndex in fromRow..toRow }
-            .map { parseCellsJson(it.cellsJson) }
+        return rows.filter { it.rowIndex in fromRow..toRow }.map { parseCellsJson(it.cellsJson) }
     }
 
-    // ── 集計 ──
-
-    /**
-     * 特定ファイルの列の数値集計。
-     * 合計・平均・最大・最小・件数を返す。
-     */
     fun aggregateColumn(fileId: Long, colName: String): AggregateResult? {
         val colResult = getColumn(fileId, colName) ?: return null
-
         val numbers = colResult.values.mapNotNull { it.replace(",", "").toDoubleOrNull() }
         if (numbers.isEmpty()) return AggregateResult(
-            colName = colResult.colName,
-            fileName = colResult.fileName,
+            colName = colResult.colName, fileName = colResult.fileName,
             count = 0, sum = 0.0, avg = 0.0, min = 0.0, max = 0.0,
             message = "「${colResult.colName}」列に数値データがありません"
         )
-
         return AggregateResult(
-            colName = colResult.colName,
-            fileName = colResult.fileName,
-            count = numbers.size,
-            sum = numbers.sum(),
-            avg = numbers.average(),
-            min = numbers.min(),
-            max = numbers.max()
+            colName = colResult.colName, fileName = colResult.fileName,
+            count = numbers.size, sum = numbers.sum(), avg = numbers.average(),
+            min = numbers.min(), max = numbers.max()
         )
     }
 
-    /**
-     * 全ファイルを横断して列名が一致するものの集計を行う。
-     */
     fun aggregateColumnAllFiles(colName: String): List<AggregateResult> {
-        return fileBox.all.mapNotNull { file ->
-            aggregateColumn(file.id, colName)
-        }.filter { it.count > 0 }
+        return fileBox.all.mapNotNull { aggregateColumn(it.id, colName) }.filter { it.count > 0 }
     }
 
     // ── ファイル管理 ──
 
     fun listFiles(): List<IndexedFile> = fileBox.all
-
     fun getFile(fileId: Long): IndexedFile? = fileBox.get(fileId)
 
     fun findFileByName(name: String): IndexedFile? {
@@ -319,7 +419,6 @@ class NexusSheetsIndex(boxStore: BoxStore) {
     }
 
     fun removeFile(fileId: Long) {
-        // まず関連行を削除
         val rows = rowBox.query(IndexedRow_.fileId.equal(fileId)).build().find()
         rowBox.remove(rows)
         fileBox.remove(fileId)
@@ -330,42 +429,38 @@ class NexusSheetsIndex(boxStore: BoxStore) {
         val existing = fileBox.query(
             IndexedFile_.fileName.equal(fileName, io.objectbox.query.QueryBuilder.StringOrder.CASE_SENSITIVE)
         ).build().find()
-        for (f in existing) {
-            removeFile(f.id)
-        }
+        for (f in existing) { removeFile(f.id) }
     }
 
-    fun removeAll() {
-        rowBox.removeAll()
-        fileBox.removeAll()
-        Log.i(TAG, "All indexed files removed")
-    }
-
+    fun removeAll() { rowBox.removeAll(); fileBox.removeAll(); Log.i(TAG, "All removed") }
     fun fileCount(): Long = fileBox.count()
     fun totalRowCount(): Long = rowBox.count()
 
+    /**
+     * 全ファイルのヘッダー一覧を返す（検索クエリ解析用）
+     */
+    fun getAllHeaders(): Map<String, List<String>> {
+        return fileBox.all.associate { file ->
+            file.fileName to parseCellsJson(file.headerJson)
+        }
+    }
+
     // ── ヘルパー ──
 
-    private fun parseCellsJson(json: String): List<String> {
+    fun parseCellsJson(json: String): List<String> {
         if (json.isBlank()) return emptyList()
         return try {
             val arr = JSONArray(json)
             (0 until arr.length()).map { arr.getString(it) }
-        } catch (e: Exception) {
-            emptyList()
-        }
+        } catch (e: Exception) { emptyList() }
     }
 
     // ── データクラス ──
 
     data class SearchResult(
-        val fileName: String,
-        val fileId: Long,
-        val rowIndex: Int,
-        val cells: List<String>,
-        val headers: List<String>
+        val fileName: String, val fileId: Long, val rowIndex: Int,
+        val cells: List<String>, val headers: List<String>
     ) {
-        /** "列名: 値" 形式のテキスト */
         fun toReadableText(): String {
             return cells.mapIndexed { i, cell ->
                 val header = headers.getOrElse(i) { "列${i + 1}" }
@@ -375,42 +470,30 @@ class NexusSheetsIndex(boxStore: BoxStore) {
     }
 
     data class CrossResult(
-        val fileName: String,
-        val rowKeyword: String,
-        val colName: String,
-        val value: String,
-        val rowIndex: Int,
-        val fullRow: List<String>,
-        val headers: List<String>
+        val fileName: String, val rowKeyword: String, val colName: String,
+        val value: String, val rowIndex: Int,
+        val fullRow: List<String>, val headers: List<String>
     )
 
-    data class ColumnResult(
-        val fileName: String,
-        val colName: String,
-        val values: List<String>
+    data class ColumnResult(val fileName: String, val colName: String, val values: List<String>)
+
+    data class ExtractResult(
+        val fileName: String, val rowIndex: Int,
+        val filterCol: String, val filterValue: String,
+        val extractCol: String, val extractedValue: String,
+        val fullRow: List<String>, val headers: List<String>
     )
 
     data class AggregateResult(
-        val colName: String,
-        val fileName: String,
-        val count: Int,
-        val sum: Double,
-        val avg: Double,
-        val min: Double,
-        val max: Double,
+        val colName: String, val fileName: String,
+        val count: Int, val sum: Double, val avg: Double, val min: Double, val max: Double,
         val message: String? = null
     ) {
         fun toText(): String {
             if (message != null) return message
-            return "$fileName の「$colName」: 件数=${count}, 合計=${formatNum(sum)}, 平均=${formatNum(avg)}, 最小=${formatNum(min)}, 最大=${formatNum(max)}"
+            return "$fileName の「$colName」: 件数=$count, 合計=${formatNum(sum)}, 平均=${formatNum(avg)}, 最小=${formatNum(min)}, 最大=${formatNum(max)}"
         }
-
-        private fun formatNum(v: Double): String {
-            return if (v == v.toLong().toDouble()) {
-                "%,.0f".format(v)
-            } else {
-                "%,.2f".format(v)
-            }
-        }
+        private fun formatNum(v: Double): String =
+            if (v == v.toLong().toDouble()) "%,.0f".format(v) else "%,.2f".format(v)
     }
 }

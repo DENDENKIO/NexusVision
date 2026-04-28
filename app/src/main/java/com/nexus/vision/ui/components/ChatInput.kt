@@ -1,5 +1,4 @@
 // ファイルパス: app/src/main/java/com/nexus/vision/ui/components/ChatInput.kt
-
 package com.nexus.vision.ui.components
 
 import android.net.Uri
@@ -16,6 +15,7 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.Send
+import androidx.compose.material.icons.filled.AttachFile
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Image
 import androidx.compose.material3.Icon
@@ -34,7 +34,8 @@ import coil.compose.AsyncImage
 /**
  * チャット入力エリア
  *
- * Phase 4 修正: 画像ボタンは常に有効、送信のみエンジン依存
+ * Phase 4: 基本実装
+ * Phase 8.5: ファイル添付ボタン追加
  */
 @Composable
 fun ChatInput(
@@ -42,6 +43,7 @@ fun ChatInput(
     onTextChange: (String) -> Unit,
     selectedImageUri: Uri?,
     onPickImage: () -> Unit,
+    onPickFile: () -> Unit,
     onClearImage: () -> Unit,
     onSend: () -> Unit,
     isEnabled: Boolean,
@@ -89,14 +91,21 @@ fun ChatInput(
         Row(
             verticalAlignment = Alignment.Bottom
         ) {
-            // 画像選択ボタン — 常に有効（エンジン状態に依存しない）
-            IconButton(
-                onClick = onPickImage
-            ) {
+            // 画像選択ボタン
+            IconButton(onClick = onPickImage) {
                 Icon(
                     imageVector = Icons.Default.Image,
                     contentDescription = "画像を選択",
                     tint = MaterialTheme.colorScheme.primary
+                )
+            }
+
+            // ファイル添付ボタン（CSV / XLSX / PDF）
+            IconButton(onClick = onPickFile) {
+                Icon(
+                    imageVector = Icons.Default.AttachFile,
+                    contentDescription = "ファイルを添付 (CSV/Excel/PDF)",
+                    tint = MaterialTheme.colorScheme.secondary
                 )
             }
 
@@ -113,7 +122,7 @@ fun ChatInput(
 
             Spacer(modifier = Modifier.width(4.dp))
 
-            // 送信ボタン — エンジン＋内容依存
+            // 送信ボタン
             IconButton(
                 onClick = onSend,
                 enabled = isEnabled && (text.isNotBlank() || selectedImageUri != null)

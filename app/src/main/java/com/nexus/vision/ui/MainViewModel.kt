@@ -1004,4 +1004,84 @@ class MainViewModel : ViewModel() {
             }
         )
     }
+
+    /**
+     * ShareReceiver からの結果テキストをチャットに追加する。
+     * MainActivity.handleShareResult() から呼ばれる。
+     */
+    fun addShareResult(text: String) {
+        addMessage(ChatMessage(role = ChatMessage.Role.ASSISTANT, text = text))
+    }
+
+    /**
+     * チャット画面のファイル添付ボタンから呼ばれる。
+     * ファイルをパースしてインデックスに登録する。
+     */
+    fun onFileSelected(uri: Uri) {
+        val processingId = addProcessingMessage("ファイルを登録中...")
+
+        viewModelScope.launch {
+            try {
+                val response = processFileAndIndex(uri)
+                replaceMessage(
+                    processingId,
+                    ChatMessage(id = processingId, role = ChatMessage.Role.ASSISTANT, text = response)
+                )
+            } catch (e: Exception) {
+                Log.e(TAG, "File registration failed", e)
+                replaceMessage(
+                    processingId,
+                    ChatMessage(id = processingId, role = ChatMessage.Role.ASSISTANT, text = "ファイル登録エラー: ${e.message}")
+                )
+            }
+        }
+    }
+
+    private suspend fun processFileAndIndex(uri: Uri): String = withContext(Dispatchers.IO) {
+        val context = app.applicationContext
+        val mimeType = context.contentResolver.getType(uri) ?: ""
+
+        // ファイル名取得
+        var filename = "unknown"
+        try {
+            val cursor = context.contentResolver.query(
+                uri, arrayOf(android.provider.MediaStore.MediaColumns.DISPLAY_NAME),
+                null, null, null
+            )
+            cursor?.use { if (it.moveToFirst()) filename = it.getString(0) ?: "unknown" }
+        } catch (e: Exception) { /* fallback */ }
+
+        val lowerFilename = filename.lowercase()
+
+        when {
+            mimeType.contains("csv") || mimeType.contains("comma-separated") ||
+                    lowerFilename.endsWith(".csv") -> {
+                val result = ExcelCsvParser.parseFromUri(context, uri, mimeType)
+                if (result.isSuccess) {
+                    sheetsIndex.addParsedTable(result.rows, filename, "csv")
+                    "「$filename」を登録しました。(${result.rowCount}行×${result.colCount}列)\nチャットから検索・質問できます。"
+                } else result.errorMessage ?: "CSV 解析失敗"
+            }
+
+            mimeType.contains("spreadsheetml") || mimeType.contains("xlsx") ||
+                    mimeType.contains("excel") ||
+                    lowerFilename.endsWith(".xlsx") || lowerFilename.endsWith(".xls") -> {
+                val result = ExcelCsvParser.parseFromUri(context, uri, mimeType)
+                if (result.isSuccess) {
+                    sheetsIndex.addParsedTable(result.rows, filename, "xlsx")
+                    "「$filename」を登録しました。(${result.rowCount}行×${result.colCount}列)\nチャットから検索・質問できます。"
+                } else result.errorMessage ?: "Excel 解析失敗"
+            }
+
+            mimeType.contains("pdf") || lowerFilename.endsWith(".pdf") -> {
+                val result = PdfExtractor.extractFromUri(context, uri)
+                if (result.isSuccess) {
+                    sheetsIndex.addPdfText(result.pages.map { it.text }, filename)
+                    "「$filename」を登録しました。(${result.processedPages}ページ)\nチャットから検索・質問できます。"
+                } else result.errorMessage ?: "PDF 解析失敗"
+            }
+
+            else -> "非対応ファイル形式: $mimeType ($filename)\n対応: CSV, Excel(.xlsx), PDF"
+        }
+    }
 }

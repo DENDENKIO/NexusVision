@@ -1,8 +1,8 @@
 // ファイルパス: app/src/main/java/com/nexus/vision/MainActivity.kt
-
 package com.nexus.vision
 
 import android.Manifest
+import android.content.Intent
 import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Build
@@ -14,7 +14,10 @@ import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.core.content.ContextCompat
+import androidx.lifecycle.ViewModelProvider
+import com.nexus.vision.os.ShareReceiver
 import com.nexus.vision.ui.MainScreen
+import com.nexus.vision.ui.MainViewModel
 import com.nexus.vision.ui.theme.NexusVisionTheme
 
 class MainActivity : ComponentActivity() {
@@ -25,6 +28,7 @@ class MainActivity : ComponentActivity() {
 
     private var onImageSelected: ((Uri) -> Unit)? = null
     private var onMultipleImagesSelected: ((List<Uri>) -> Unit)? = null
+    private lateinit var mainViewModel: MainViewModel
 
     private val pickMedia =
         registerForActivityResult(ActivityResultContracts.PickVisualMedia()) { uri ->
@@ -42,6 +46,25 @@ class MainActivity : ComponentActivity() {
             }
         }
 
+    /**
+     * ファイルピッカー: CSV / XLSX / PDF を選択
+     */
+    private val pickFile =
+        registerForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+            if (uri != null) {
+                Log.d(TAG, "File selected: $uri")
+                // 永続的な読み取り権限を取得
+                try {
+                    contentResolver.takePersistableUriPermission(
+                        uri, Intent.FLAG_GRANT_READ_URI_PERMISSION
+                    )
+                } catch (e: Exception) {
+                    Log.d(TAG, "Could not take persistable permission: ${e.message}")
+                }
+                mainViewModel.onFileSelected(uri)
+            }
+        }
+
     private val requestPermissions =
         registerForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { grants ->
             for ((permission, granted) in grants) {
@@ -54,10 +77,17 @@ class MainActivity : ComponentActivity() {
         enableEdgeToEdge()
         requestRequiredPermissions()
 
+        mainViewModel = ViewModelProvider(this)[MainViewModel::class.java]
+
+        // ShareReceiver からの結果を処理
+        handleShareResult(intent)
+
         setContent {
             NexusVisionTheme {
                 MainScreen(
+                    viewModel = mainViewModel,
                     onPickImage = { launchImagePicker() },
+                    onPickFile = { launchFilePicker() },
                     onPickMultipleImages = { launchMultipleImagePicker() },
                     onImageSelected = { callback ->
                         onImageSelected = callback
@@ -70,6 +100,23 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        handleShareResult(intent)
+    }
+
+    /**
+     * ShareReceiver から渡された結果テキストをチャットに追加する
+     */
+    private fun handleShareResult(intent: Intent?) {
+        val shareResult = intent?.getStringExtra(ShareReceiver.EXTRA_SHARE_RESULT)
+        if (!shareResult.isNullOrBlank()) {
+            mainViewModel.addShareResult(shareResult)
+            // Extra を消費して再処理を防止
+            intent.removeExtra(ShareReceiver.EXTRA_SHARE_RESULT)
+        }
+    }
+
     private fun launchImagePicker() {
         pickMedia.launch(
             PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)
@@ -79,6 +126,19 @@ class MainActivity : ComponentActivity() {
     private fun launchMultipleImagePicker() {
         pickMultipleMedia.launch(
             PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)
+        )
+    }
+
+    private fun launchFilePicker() {
+        pickFile.launch(
+            arrayOf(
+                "text/csv",
+                "text/comma-separated-values",
+                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                "application/vnd.ms-excel",
+                "application/pdf",
+                "application/octet-stream"
+            )
         )
     }
 

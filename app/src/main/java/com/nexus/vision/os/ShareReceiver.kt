@@ -10,10 +10,7 @@ import androidx.activity.compose.setContent
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
@@ -26,6 +23,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
+import com.nexus.vision.MainActivity
 import com.nexus.vision.NexusApplication
 import com.nexus.vision.engine.EngineState
 import com.nexus.vision.engine.NexusEngineManager
@@ -40,8 +38,8 @@ import kotlinx.coroutines.withContext
 /**
  * ACTION_SEND / ACTION_SEND_MULTIPLE で共有されたデータを受信する Activity。
  *
- * CSV / Excel / PDF はインデックスに登録し、チャットから検索可能にする。
- * 画像は OCR 処理。テキストは AI 要約。
+ * CSV / Excel / PDF はインデックスに登録し、処理後に MainActivity へ遷移する。
+ * 画像は OCR、テキストは AI 要約し、結果を MainActivity のチャットに表示。
  *
  * Phase 10: OS 統合
  * Phase 8.5: NexusSheets インデックス統合
@@ -50,6 +48,7 @@ class ShareReceiver : ComponentActivity() {
 
     companion object {
         private const val TAG = "ShareReceiver"
+        const val EXTRA_SHARE_RESULT = "com.nexus.vision.SHARE_RESULT"
 
         private val FILE_EXTENSIONS = setOf(
             ".csv", ".xlsx", ".xls", ".pdf",
@@ -67,9 +66,6 @@ class ShareReceiver : ComponentActivity() {
             "spreadsheetml", "xlsx", "excel",
             "octet-stream"
         )
-
-        /** インデックス登録対象の拡張子 */
-        private val INDEXABLE_EXTENSIONS = setOf(".csv", ".xlsx", ".pdf")
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -80,21 +76,20 @@ class ShareReceiver : ComponentActivity() {
         setContent {
             NexusVisionTheme {
                 Surface(modifier = Modifier.fillMaxSize()) {
-                    var resultText by remember { mutableStateOf<String?>(null) }
                     var isProcessing by remember { mutableStateOf(true) }
 
                     LaunchedEffect(Unit) {
-                        resultText = processReceivedData(receivedData)
+                        val result = processReceivedData(receivedData)
                         isProcessing = false
+                        // MainActivity へ遷移し、結果テキストを渡す
+                        navigateToMain(result)
                     }
 
-                    Box(
-                        modifier = Modifier
-                            .fillMaxSize()
-                            .padding(24.dp),
-                        contentAlignment = Alignment.Center
-                    ) {
-                        if (isProcessing) {
+                    if (isProcessing) {
+                        Box(
+                            modifier = Modifier.fillMaxSize().padding(24.dp),
+                            contentAlignment = Alignment.Center
+                        ) {
                             Column(horizontalAlignment = Alignment.CenterHorizontally) {
                                 CircularProgressIndicator()
                                 Text(
@@ -103,28 +98,24 @@ class ShareReceiver : ComponentActivity() {
                                     modifier = Modifier.padding(top = 16.dp)
                                 )
                             }
-                        } else {
-                            Column(
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .verticalScroll(rememberScrollState()),
-                                horizontalAlignment = Alignment.CenterHorizontally
-                            ) {
-                                Text(
-                                    text = "処理結果",
-                                    style = MaterialTheme.typography.headlineSmall,
-                                    modifier = Modifier.padding(bottom = 16.dp)
-                                )
-                                Text(
-                                    text = resultText ?: "データを処理できませんでした",
-                                    style = MaterialTheme.typography.bodyMedium
-                                )
-                            }
                         }
                     }
                 }
             }
         }
+    }
+
+    /**
+     * 処理完了後に MainActivity へ遷移する。
+     * 結果テキストを EXTRA_SHARE_RESULT として渡す。
+     */
+    private fun navigateToMain(resultText: String) {
+        val mainIntent = Intent(this, MainActivity::class.java).apply {
+            flags = Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP
+            putExtra(EXTRA_SHARE_RESULT, resultText)
+        }
+        startActivity(mainIntent)
+        finish()
     }
 
     private fun parseIntent(intent: Intent): ReceivedData {
@@ -213,16 +204,12 @@ class ShareReceiver : ComponentActivity() {
 
     private suspend fun processText(text: String): String {
         if (text.isBlank()) return "テキストが空です"
-
         val engine = NexusEngineManager.getInstance()
         return if (engine.state.value is EngineState.Ready) {
             val result = engine.inferText("以下のテキストを簡潔に要約してください:\n\n$text")
-            result.getOrElse {
-                "エンジンエラー: ${it.message}\n\n元テキスト:\n$text"
-            }
+            result.getOrElse { "元テキスト:\n$text" }
         } else {
-            "【共有テキスト受信】\n\n$text\n\n" +
-                    "(エンジン未ロードのため要約はスキップされました)"
+            "【共有テキスト受信】\n\n$text"
         }
     }
 
@@ -230,11 +217,8 @@ class ShareReceiver : ComponentActivity() {
         val ocrEngine = MlKitOcrEngine()
         return try {
             val result = ocrEngine.recognizeFromUri(applicationContext, uri)
-            if (result.isNotBlank()) {
-                "【テキスト読み取り結果】\n\n$result"
-            } else {
-                "テキストを検出できませんでした"
-            }
+            if (result.isNotBlank()) "【テキスト読み取り結果】\n\n$result"
+            else "テキストを検出できませんでした"
         } catch (e: Exception) {
             Log.e(TAG, "OCR failed", e)
             "OCR エラー: ${e.message}"
@@ -246,17 +230,12 @@ class ShareReceiver : ComponentActivity() {
     private suspend fun processMultipleImages(uris: List<Uri>): String {
         val ocrEngine = MlKitOcrEngine()
         val results = StringBuilder()
-
         try {
             for ((index, uri) in uris.withIndex()) {
                 results.appendLine("--- 画像 ${index + 1}/${uris.size} ---")
                 try {
                     val text = ocrEngine.recognizeFromUri(applicationContext, uri)
-                    if (text.isNotBlank()) {
-                        results.appendLine(text)
-                    } else {
-                        results.appendLine("(テキスト未検出)")
-                    }
+                    results.appendLine(if (text.isNotBlank()) text else "(テキスト未検出)")
                 } catch (e: Exception) {
                     results.appendLine("(エラー: ${e.message})")
                 }
@@ -265,13 +244,9 @@ class ShareReceiver : ComponentActivity() {
         } finally {
             ocrEngine.close()
         }
-
         return results.toString().ifBlank { "テキストを検出できませんでした" }
     }
 
-    /**
-     * ファイル処理: CSV / Excel はインデックス登録、PDF も登録、ソースコードは構造解析のみ
-     */
     private suspend fun processFile(uri: Uri, mimeType: String): String {
         val filename = getFilename(uri)
         val resolvedMime = mimeType.ifBlank { contentResolver.getType(uri) ?: "" }
@@ -287,33 +262,21 @@ class ShareReceiver : ComponentActivity() {
                     lowerFilename.endsWith(".csv") -> {
                 val result = ExcelCsvParser.parseFromUri(applicationContext, uri, resolvedMime)
                 if (result.isSuccess) {
-                    val fileId = sheetsIndex.addParsedTable(result.rows, filename, "csv")
-                    buildString {
-                        appendLine("「$filename」を登録しました。")
-                        appendLine("${result.rowCount} 行 × ${result.colCount} 列 (${result.processingTimeMs}ms)")
-                        appendLine()
-                        appendLine("チャットから検索・質問できます。")
-                        appendLine("例: 「東京の売上」「売上の合計」「○○を検索」")
-                    }
+                    sheetsIndex.addParsedTable(result.rows, filename, "csv")
+                    "「$filename」を登録しました。(${result.rowCount}行×${result.colCount}列)\nチャットから検索・質問できます。"
                 } else {
                     result.errorMessage ?: "CSV 解析失敗"
                 }
             }
 
-            // Excel (.xlsx)
+            // Excel
             resolvedMime.contains("spreadsheetml") || resolvedMime.contains("xlsx") ||
                     resolvedMime.contains("excel") ||
                     lowerFilename.endsWith(".xlsx") || lowerFilename.endsWith(".xls") -> {
                 val result = ExcelCsvParser.parseFromUri(applicationContext, uri, resolvedMime)
                 if (result.isSuccess) {
-                    val fileId = sheetsIndex.addParsedTable(result.rows, filename, "xlsx")
-                    buildString {
-                        appendLine("「$filename」を登録しました。")
-                        appendLine("${result.rowCount} 行 × ${result.colCount} 列 (${result.processingTimeMs}ms)")
-                        appendLine()
-                        appendLine("チャットから検索・質問できます。")
-                        appendLine("例: 「東京の売上」「売上の合計」「○○を検索」")
-                    }
+                    sheetsIndex.addParsedTable(result.rows, filename, "xlsx")
+                    "「$filename」を登録しました。(${result.rowCount}行×${result.colCount}列)\nチャットから検索・質問できます。"
                 } else {
                     result.errorMessage ?: "Excel 解析失敗"
                 }
@@ -324,35 +287,22 @@ class ShareReceiver : ComponentActivity() {
                 val result = PdfExtractor.extractFromUri(applicationContext, uri)
                 if (result.isSuccess) {
                     val pageTexts = result.pages.map { it.text }
-                    val fileId = sheetsIndex.addPdfText(pageTexts, filename)
-                    buildString {
-                        appendLine("「$filename」を登録しました。")
-                        appendLine("${result.processedPages}/${result.totalPages} ページ (${result.processingTimeMs}ms)")
-                        appendLine()
-                        appendLine("チャットから検索・質問できます。")
-                        appendLine("例: 「○○を検索」「○○について教えて」")
-                    }
+                    sheetsIndex.addPdfText(pageTexts, filename)
+                    "「$filename」を登録しました。(${result.processedPages}ページ)\nチャットから検索・質問できます。"
                 } else {
                     result.errorMessage ?: "PDF 解析失敗"
                 }
             }
 
-            // ソースコード / テキスト系（インデックス対象外、構造解析のみ）
-            resolvedMime.startsWith("text/") ||
-                    resolvedMime.contains("octet-stream") ||
-                    FILE_EXTENSIONS.any { lowerFilename.endsWith(it) } -> {
+            // ソースコード
+            FILE_EXTENSIONS.any { lowerFilename.endsWith(it) } ||
+                    resolvedMime.startsWith("text/") || resolvedMime.contains("octet-stream") -> {
                 val result = SourceCodeParser.parseFromUri(applicationContext, uri, resolvedMime)
-                if (result.isSuccess) {
-                    result.toSummaryText()
-                } else {
-                    result.errorMessage ?: "ファイル解析失敗"
-                }
+                if (result.isSuccess) result.toSummaryText()
+                else result.errorMessage ?: "ファイル解析失敗"
             }
 
-            else -> {
-                "非対応ファイル形式: $resolvedMime ($filename)\n\n" +
-                        "対応形式: CSV, Excel(.xlsx), PDF, ソースコード(.kt .java .py .js 等), 画像(OCR)"
-            }
+            else -> "非対応ファイル形式: $resolvedMime ($filename)"
         }
     }
 
