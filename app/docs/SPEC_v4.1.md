@@ -78,7 +78,7 @@ AGP 8.7.3、Kotlin 2.2.21、Compose BOM 2026.04.01（最新安定版）。
 
 ### 3.4 AndroidManifest.xml 要件
 
-`android:largeHeap="true"`（Gemma-4 が約 1.5 GB 確保）。`FOREGROUND_SERVICE_SPECIAL_USE` パーミッション。`uses-native-library` で `libOpenCL.so`, `libcdsprpc.so`, `libvndksupport.so` を `android:required="false"` で宣言し、GPU 非対応端末でもクラッシュしません。
+`android:largeHeap="true"`（Gemma-4 が約 1.5 GB 確保）。`FOREGROUND_SERVICE` および `FOREGROUND_SERVICE_DATA_SYNC` パーミッション。Android 14+ 対応のため、WorkManager の `SystemForegroundService` に対しても `foregroundServiceType="dataSync"` を明示的に宣言し、`ForegroundInfo` 経由で型を渡します。`uses-native-library` で `libOpenCL.so`, `libcdsprpc.so`, `libvndksupport.so` を `android:required="false"` で宣言し、GPU 非対応端末でもクラッシュしません。
 
 ### 3.5 ネイティブビルド構成（実装済み）
 

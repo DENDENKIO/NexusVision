@@ -217,7 +217,7 @@ org.apache.poi:poi-ooxml:5.5.1  (poi-android wrapper)
 
 **Step 4-3** ✅: `worker/BatchEnhanceQueue.kt` 作成。キュー管理、StateFlow で進捗を UI に公開。
 
-**Step 4-4** ✅: `worker/BatchEnhanceWorker.kt` 作成。WorkManager CoroutineWorker。直列処理 + フォアグラウンドサービス連携。
+**Step 4-4** ✅: `worker/BatchEnhanceWorker.kt` 作成。WorkManager CoroutineWorker。直列処理 + フォアグラウンドサービス連携（Android 14+ クラッシュ対策済み）。
 
 **Step 4-5** ✅: `notification/BatchNotificationHelper.kt` 作成。進捗・完了・発熱通知管理。
 

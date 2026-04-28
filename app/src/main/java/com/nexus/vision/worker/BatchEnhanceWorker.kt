@@ -4,6 +4,7 @@ package com.nexus.vision.worker
 
 import android.content.ContentValues
 import android.content.Context
+import android.content.pm.ServiceInfo
 import android.graphics.Bitmap
 import android.net.Uri
 import android.os.Environment
@@ -209,6 +210,10 @@ class BatchEnhanceWorker(
         val notification = BatchNotificationHelper.createProgressNotification(
             applicationContext, current, total, fileName, remainingMs
         )
-        return ForegroundInfo(BatchNotificationHelper.NOTIFICATION_ID_PROGRESS, notification)
+        return ForegroundInfo(
+            BatchNotificationHelper.NOTIFICATION_ID_PROGRESS, 
+            notification,
+            ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC
+        )
     }
 }
