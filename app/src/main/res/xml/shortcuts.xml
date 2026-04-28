@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- ファイルパス: app/src/main/res/xml/shortcuts.xml -->
+<shortcuts xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <!--
+      App Actions: Gemini / Google Assistant から起動するための BII 定義。
+      「NEXUS Vision で○○を調べて」→ AppActionsHandler が起動。
+      Phase 10: OS 統合
+    -->
+
+    <capability android:name="actions.intent.GET_THING">
+        <intent
+            android:action="android.intent.action.VIEW"
+            android:targetPackage="com.nexus.vision"
+            android:targetClass="com.nexus.vision.os.AppActionsHandler">
+            <parameter
+                android:name="thing.name"
+                android:key="query" />
+        </intent>
+    </capability>
+
+    <!-- 静的ショートカット: ホーム画面ロングプレスで表示 -->
+    <shortcut
+        android:shortcutId="quick_ask"
+        android:enabled="true"
+        android:shortcutShortLabel="@string/shortcut_ask_label"
+        android:shortcutLongLabel="@string/shortcut_ask_long_label">
+        <intent
+            android:action="android.intent.action.VIEW"
+            android:targetPackage="com.nexus.vision"
+            android:targetClass="com.nexus.vision.os.AppActionsHandler" />
+        <capability-binding android:key="actions.intent.GET_THING" />
+    </shortcut>
+
+</shortcuts>

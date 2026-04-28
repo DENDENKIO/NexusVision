@@ -1,5 +1,9 @@
 <!-- ファイルパス: app/src/main/res/values/strings.xml -->
-
 <resources>
     <string name="app_name">NEXUS Vision</string>
+    <string name="shortcut_ask_label">NEXUS に質問</string>
+    <string name="shortcut_ask_long_label">NEXUS Vision に質問する</string>
+    <string name="share_label">NEXUS Vision で処理</string>
+    <string name="process_text_label">NEXUS 解析</string>
+    <string name="qs_tile_label">NEXUS HUD</string>
 </resources>
