@@ -1,1039 +1,416 @@
 
+
 ---
 
-## コード生成AIへの指示: Phase 8-9 完全実装
+## コード生成AIへの指示: ShareReceiver.kt の parseIntent 修正
 
-### プロジェクト情報
-- リポジトリ: https://github.com/DENDENKIO/NexusVision/tree/master
-- パッケージ: `com.nexus.vision`
-- Kotlin, Android API 31-35, arm64-v8a, AGP 8.7.3
+### 問題
+`.kt` ファイルや `.xlsx` ファイルを他アプリから共有しても、パーサー（ExcelCsvParser / SourceCodeParser）が呼ばれない。原因は `parseIntent()` 内で `text/*` MIME タイプを受信した場合に `EXTRA_STREAM`（ファイル URI）ではなく `EXTRA_TEXT`（文字列）を優先して `TextData` に分類してしまうため。また `application/octet-stream` で送られるファイルも `FileData` に分類されるが、ファイル名の拡張子チェックが `parseIntent` にないため見逃す。
 
-### 不足しているもの（すでに作成済みの場合はするー）
-1. `parser/ExcelCsvParser.kt` — CSV / XLSX パーサー
-2. `parser/SourceCodeParser.kt` — ソースコード構造解析
-3. `parser/PdfExtractor.kt` — PDF → OCR テキスト抽出
-4. `ocr/TableReconstructor.kt` — OCR 座標から表構造を復元
-5. `os/ShareReceiver.kt` — ファイル解析対応版に更新
-6. `ui/MainViewModel.kt` — チャットから PDF/CSV/写真→テーブル等を使えるように更新
+### 修正方針
+`parseIntent` で `EXTRA_STREAM` に URI があればファイル名の拡張子を見て `FileData` に優先的に分類する。
 
-### 新規ファイル 1: `app/src/main/java/com/nexus/vision/parser/ExcelCsvParser.kt`
-
-前回の指示と同一（上で提示済み）。そのまま作成。
-
-### 新規ファイル 2: `app/src/main/java/com/nexus/vision/parser/SourceCodeParser.kt`
-
-前回の指示と同一（上で提示済み）。そのまま作成。
-
-### 新規ファイル 3: `app/src/main/java/com/nexus/vision/parser/PdfExtractor.kt`
-
-前回の指示と同一（上で提示済み）。そのまま作成。
-
-### 新規ファイル 4: `app/src/main/java/com/nexus/vision/ocr/TableReconstructor.kt`
-
-前回の指示と同一（上で提示済み）。そのまま作成。
-
-### 更新ファイル 5: `app/src/main/java/com/nexus/vision/os/ShareReceiver.kt`（完全置換）
-
-前回の指示の Phase 8 統合版（上で提示済み）。processFile を CSV/XLSX/PDF/ソースコード対応に更新した版。そのまま置換。
-
-### 更新ファイル 6: `app/src/main/java/com/nexus/vision/ui/MainViewModel.kt`（完全置換）
-
-以下の変更を加えたものに完全置換:
+### 対象ファイル: `app/src/main/java/com/nexus/vision/os/ShareReceiver.kt`（完全置換）
 
 ```kotlin
-// ファイルパス: app/src/main/java/com/nexus/vision/ui/MainViewModel.kt
+// ファイルパス: app/src/main/java/com/nexus/vision/os/ShareReceiver.kt
+package com.nexus.vision.os
 
-package com.nexus.vision.ui
-
-import android.content.ContentValues
-import android.content.Context
-import android.graphics.Bitmap
-import android.graphics.BitmapFactory
+import android.content.Intent
 import android.net.Uri
-import android.os.Environment
-import android.provider.MediaStore
+import android.os.Bundle
 import android.util.Log
-import androidx.lifecycle.ViewModel
-import androidx.lifecycle.viewModelScope
-import com.nexus.vision.NexusApplication
-import com.nexus.vision.cache.L1PHashCache
-import com.nexus.vision.cache.L2InferenceCache
-import com.nexus.vision.deor.AdaptiveResizer
-import com.nexus.vision.deor.PHashCalculator
+import androidx.activity.ComponentActivity
+import androidx.activity.compose.setContent
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Surface
+import androidx.compose.material3.Text
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.unit.dp
 import com.nexus.vision.engine.EngineState
 import com.nexus.vision.engine.NexusEngineManager
-import com.nexus.vision.engine.ThermalLevel
-import com.nexus.vision.image.DocumentSharpener
-import com.nexus.vision.image.DirectCrop100MP
-import com.nexus.vision.image.RegionDecoder
 import com.nexus.vision.ocr.MlKitOcrEngine
-import com.nexus.vision.ocr.TableReconstructor
-import com.nexus.vision.ui.components.ChatMessage
-import com.nexus.vision.pipeline.RouteCProcessor
-import com.nexus.vision.ncnn.RealEsrganBridge
 import com.nexus.vision.parser.ExcelCsvParser
 import com.nexus.vision.parser.PdfExtractor
 import com.nexus.vision.parser.SourceCodeParser
+import com.nexus.vision.ui.theme.NexusVisionTheme
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.flow.MutableStateFlow
-import kotlinx.coroutines.flow.SharingStarted
-import kotlinx.coroutines.flow.StateFlow
-import kotlinx.coroutines.flow.asStateFlow
-import kotlinx.coroutines.flow.stateIn
-import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
-import java.io.File
-import java.io.FileOutputStream
-import java.io.IOException
-import java.text.SimpleDateFormat
-import java.util.Date
-import java.util.Locale
-import androidx.work.ExistingWorkPolicy
-import androidx.work.OneTimeWorkRequestBuilder
-import androidx.work.WorkManager
-import com.nexus.vision.worker.BatchEnhanceQueue
-import com.nexus.vision.worker.BatchEnhanceWorker
 
-/** 範囲選択の目的 */
-enum class CropPurpose {
-    ENHANCE,  // 高画質化
-    ZOOM      // ズーム（拡大）
-}
-
-data class MainUiState(
-    val isEngineReady: Boolean = false,
-    val isProcessing: Boolean = false,
-    val isDegraded: Boolean = false,
-    val statusMessage: String = "AI エンジン準備中...",
-    val errorMessage: String? = null,
-    val thermalLevelName: String = "NONE",
-    val messages: List<ChatMessage> = emptyList(),
-    val inputText: String = "",
-    val selectedImageUri: Uri? = null,
-    val selectedImagePath: String? = null,
-    // 範囲選択モード
-    val cropMode: Boolean = false,
-    val cropPurpose: CropPurpose = CropPurpose.ENHANCE,
-    val cropImageUri: Uri? = null,
-    val cropThumbnail: Bitmap? = null,
-    val cropImageWidth: Int = 0,
-    val cropImageHeight: Int = 0,
-    val isBatchRunning: Boolean = false,
-    val batchProgressText: String = "",
-    val requestBatchPicker: Boolean = false
-)
-
-class MainViewModel : ViewModel() {
+/**
+ * ACTION_SEND / ACTION_SEND_MULTIPLE で共有された
+ * 画像・テキスト・ファイルを受信する Activity。
+ *
+ * Phase 10: OS 統合
+ * Phase 8: ファイル解析統合
+ */
+class ShareReceiver : ComponentActivity() {
 
     companion object {
-        private const val TAG = "MainViewModel"
+        private const val TAG = "ShareReceiver"
+
+        /** ファイルとして解析すべき拡張子一覧 */
+        private val FILE_EXTENSIONS = setOf(
+            ".csv", ".xlsx", ".xls", ".pdf",
+            ".kt", ".kts", ".java", ".py", ".js", ".ts", ".jsx", ".tsx",
+            ".c", ".cpp", ".cc", ".cxx", ".h", ".hpp",
+            ".swift", ".go", ".rs", ".dart", ".rb",
+            ".json", ".xml", ".yaml", ".yml",
+            ".md", ".sh", ".bash", ".sql",
+            ".html", ".htm", ".css", ".scss",
+            ".gradle", ".toml", ".properties", ".cfg", ".ini", ".conf"
+        )
+
+        /** ファイルとして解析すべき MIME タイプの部分文字列 */
+        private val FILE_MIME_PARTS = setOf(
+            "pdf", "csv", "comma-separated",
+            "spreadsheetml", "xlsx", "excel",
+            "octet-stream"
+        )
     }
 
-    private val app = NexusApplication.getInstance()
-    private val engineManager = NexusEngineManager.getInstance()
-    private val l1Cache: L1PHashCache = app.l1Cache
-    private val l2Cache: L2InferenceCache = app.l2Cache
+    override fun onCreate(savedInstanceState: Bundle?) {
+        super.onCreate(savedInstanceState)
 
-    private val ocrEngine = MlKitOcrEngine()
+        val receivedData = parseIntent(intent)
 
-    private var routeC: RouteCProcessor? = null
-    private var routeCInitialized = false
+        setContent {
+            NexusVisionTheme {
+                Surface(modifier = Modifier.fillMaxSize()) {
+                    var resultText by remember { mutableStateOf<String?>(null) }
+                    var isProcessing by remember { mutableStateOf(true) }
 
-    private var batchProgressMessageId: String? = null
+                    LaunchedEffect(Unit) {
+                        resultText = processReceivedData(receivedData)
+                        isProcessing = false
+                    }
 
-    private val _uiState = MutableStateFlow(MainUiState())
-    val uiState: StateFlow<MainUiState> = _uiState.asStateFlow()
-
-    val engineState: StateFlow<EngineState> = engineManager.state
-        .stateIn(viewModelScope, SharingStarted.Eagerly, EngineState.Idle)
-
-    val thermalLevel: StateFlow<ThermalLevel> =
-        app.thermalMonitor.thermalLevel
-            .stateIn(viewModelScope, SharingStarted.Eagerly, ThermalLevel.NONE)
-
-    init {
-        viewModelScope.launch {
-            engineManager.state.collect { state ->
-                _uiState.value = _uiState.value.copy(
-                    isEngineReady = state is EngineState.Ready,
-                    isProcessing = state is EngineState.Processing,
-                    isDegraded = state is EngineState.Degraded,
-                    statusMessage = when (state) {
-                        is EngineState.Idle -> "エンジン未ロード"
-                        is EngineState.Initializing -> "モデルロード中..."
-                        is EngineState.Ready -> "準備完了"
-                        is EngineState.Processing -> state.taskDescription
-                        is EngineState.Degraded -> "発熱のためテキストオンリーモード"
-                        is EngineState.Error -> "エラー: ${state.message}"
-                        is EngineState.Released -> "エンジン解放済み"
-                    },
-                    errorMessage = if (state is EngineState.Error) state.message else null
-                )
-            }
-        }
-
-        viewModelScope.launch {
-            thermalLevel.collect { level ->
-                _uiState.value = _uiState.value.copy(thermalLevelName = level.name)
-            }
-        }
-
-        addSystemMessage("NEXUS Vision へようこそ。画像・PDF・CSV・テキストを送信できます。エンジンをロードするとAI解析も利用可能です。")
-        initSuperResolution()
-
-        // バッチ進捗監視
-        viewModelScope.launch {
-            BatchEnhanceQueue.progress.collect { progress ->
-                if (!progress.isRunning && progress.total == 0) {
-                    _uiState.value = _uiState.value.copy(
-                        isBatchRunning = false,
-                        batchProgressText = ""
-                    )
-                    return@collect
-                }
-
-                val text = buildString {
-                    if (progress.isPaused) {
-                        append("⏸ 一時停止中 (${progress.pauseReason})")
-                    } else if (progress.isRunning) {
-                        append("🔄 ${progress.completed + 1}/${progress.total} 処理中...")
-                        if (progress.estimatedRemainingMs > 0) {
-                            val min = progress.estimatedRemainingMs / 60_000
-                            val sec = (progress.estimatedRemainingMs % 60_000) / 1_000
-                            append(" 残り約 ${min}分${sec}秒")
+                    Box(
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .padding(24.dp),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        if (isProcessing) {
+                            Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                                CircularProgressIndicator()
+                                Text(
+                                    text = "NEXUS Vision で処理中...",
+                                    style = MaterialTheme.typography.bodyLarge,
+                                    modifier = Modifier.padding(top = 16.dp)
+                                )
+                            }
+                        } else {
+                            Column(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .verticalScroll(rememberScrollState()),
+                                horizontalAlignment = Alignment.CenterHorizontally
+                            ) {
+                                Text(
+                                    text = "処理結果",
+                                    style = MaterialTheme.typography.headlineSmall,
+                                    modifier = Modifier.padding(bottom = 16.dp)
+                                )
+                                Text(
+                                    text = resultText ?: "データを処理できませんでした",
+                                    style = MaterialTheme.typography.bodyMedium
+                                )
+                            }
                         }
-                    } else {
-                        append("✅ バッチ完了: ${progress.successCount}/${progress.total} 成功")
-                        if (progress.failed > 0) append("、${progress.failed} 失敗")
                     }
                 }
-
-                _uiState.value = _uiState.value.copy(
-                    isBatchRunning = progress.isRunning || progress.isPaused,
-                    batchProgressText = text
-                )
-
-                val msgId = batchProgressMessageId
-                if (msgId != null) {
-                    replaceMessage(
-                        msgId,
-                        ChatMessage(id = msgId, role = ChatMessage.Role.ASSISTANT, text = text)
-                    )
-                }
-            }
-        }
-    }
-
-    private fun initSuperResolution() {
-        viewModelScope.launch(Dispatchers.IO) {
-            routeC = RouteCProcessor(app.applicationContext)
-            routeCInitialized = routeC?.initialize() == true
-            if (routeCInitialized) {
-                Log.i(TAG, "Super-resolution ready")
-            } else {
-                Log.w(TAG, "Super-resolution init failed (will passthrough)")
-            }
-        }
-    }
-
-    override fun onCleared() {
-        super.onCleared()
-        ocrEngine.close()
-        routeC?.release()
-    }
-
-    // ── エンジン操作 ──
-
-    fun loadEngine() {
-        viewModelScope.launch {
-            addSystemMessage("エンジンをロード中...")
-            engineManager.loadEngine()
-            if (engineManager.state.value is EngineState.Ready) {
-                addSystemMessage("エンジンの準備が完了しました。メッセージを送信できます。")
-            }
-        }
-    }
-
-    // ── 入力操作 ──
-
-    fun updateInputText(text: String) {
-        _uiState.value = _uiState.value.copy(inputText = text)
-    }
-
-    fun setSelectedImage(uri: Uri) {
-        _uiState.value = _uiState.value.copy(
-            selectedImageUri = uri,
-            selectedImagePath = null
-        )
-    }
-
-    fun clearSelectedImage() {
-        _uiState.value = _uiState.value.copy(
-            selectedImageUri = null,
-            selectedImagePath = null
-        )
-    }
-
-    // ── 範囲選択モード ──
-
-    fun cancelCropMode() {
-        _uiState.value = _uiState.value.copy(
-            cropMode = false,
-            cropPurpose = CropPurpose.ENHANCE,
-            cropImageUri = null,
-            cropThumbnail = null,
-            cropImageWidth = 0,
-            cropImageHeight = 0
-        )
-    }
-
-    fun onCropConfirmed(left: Float, top: Float, right: Float, bottom: Float) {
-        val uri = _uiState.value.cropImageUri ?: return
-        val imgW = _uiState.value.cropImageWidth
-        val imgH = _uiState.value.cropImageHeight
-        val purpose = _uiState.value.cropPurpose
-
-        _uiState.value = _uiState.value.copy(
-            cropMode = false,
-            cropThumbnail = null
-        )
-
-        val pxLeft = (left * imgW).toInt()
-        val pxTop = (top * imgH).toInt()
-        val pxRight = (right * imgW).toInt()
-        val pxBottom = (bottom * imgH).toInt()
-
-        val actionLabel = when (purpose) {
-            CropPurpose.ENHANCE -> "選択範囲を高画質化"
-            CropPurpose.ZOOM -> "選択範囲をズーム"
-        }
-
-        addMessage(
-            ChatMessage(
-                role = ChatMessage.Role.USER,
-                text = "${actionLabel}: (${pxLeft},${pxTop})-(${pxRight},${pxBottom})"
-            )
-        )
-
-        val processingLabel = when (purpose) {
-            CropPurpose.ENHANCE -> "選択範囲を高画質化中..."
-            CropPurpose.ZOOM -> "選択範囲を超解像中..."
-        }
-        val processingId = addProcessingMessage(processingLabel)
-
-        viewModelScope.launch {
-            try {
-                val response = processRegionZoom(uri, left, top, right, bottom, imgW, imgH, purpose)
-                replaceMessage(
-                    processingId,
-                    ChatMessage(id = processingId, role = ChatMessage.Role.ASSISTANT, text = response)
-                )
-            } catch (e: Exception) {
-                Log.e(TAG, "Region zoom failed", e)
-                replaceMessage(
-                    processingId,
-                    ChatMessage(id = processingId, role = ChatMessage.Role.ASSISTANT, text = "エラーが発生しました: ${e.message}")
-                )
-            }
-        }
-    }
-
-    // ── メッセージ送信 ──
-
-    fun sendMessage() {
-        val text = _uiState.value.inputText.trim()
-        val imageUri = _uiState.value.selectedImageUri
-
-        if (text.isBlank() && imageUri == null) return
-
-        // バッチ高画質化コマンド判定
-        val isBatchRequest = text.contains("バッチ", ignoreCase = true) &&
-                (text.contains("高画質", ignoreCase = true) || text.contains("enhance", ignoreCase = true))
-
-        if (isBatchRequest && imageUri == null) {
-            addMessage(ChatMessage(role = ChatMessage.Role.USER, text = text))
-            _uiState.value = _uiState.value.copy(
-                inputText = "",
-                requestBatchPicker = true
-            )
-            addMessage(
-                ChatMessage(
-                    role = ChatMessage.Role.ASSISTANT,
-                    text = "複数画像を選択してください。選択後にバッチ高画質化を開始します。"
-                )
-            )
-            return
-        }
-
-        val displayText = text.ifBlank { "この画像を分析してください" }
-
-        addMessage(
-            ChatMessage(
-                role = ChatMessage.Role.USER,
-                text = displayText,
-                imagePath = imageUri?.toString()
-            )
-        )
-
-        _uiState.value = _uiState.value.copy(
-            inputText = "",
-            selectedImageUri = null,
-            selectedImagePath = null
-        )
-
-        // ── コマンド判定 ──
-
-        val isOcrRequest = imageUri != null && (
-                text.contains("読み取", ignoreCase = true) ||
-                text.contains("テキスト", ignoreCase = true) ||
-                text.contains("OCR", ignoreCase = true) ||
-                text.contains("文字", ignoreCase = true) ||
-                text.isBlank()
-        )
-
-        val isTableRequest = imageUri != null && (
-                text.contains("表", ignoreCase = true) ||
-                text.contains("テーブル", ignoreCase = true) ||
-                text.contains("table", ignoreCase = true) ||
-                text.contains("CSV", ignoreCase = true) ||
-                text.contains("Markdown", ignoreCase = true)
-        )
-
-        val isEnhanceRequest = imageUri != null && (
-                text.contains("鮮明", ignoreCase = true) ||
-                text.contains("高画質", ignoreCase = true) ||
-                text.contains("超解像", ignoreCase = true) ||
-                text.contains("enhance", ignoreCase = true) ||
-                text.contains("きれい", ignoreCase = true)
-        )
-
-        val isZoomRequest = imageUri != null && (
-                text.contains("ズーム", ignoreCase = true) ||
-                text.contains("拡大", ignoreCase = true) ||
-                text.contains("zoom", ignoreCase = true)
-        )
-
-        // ファイル解析判定（画像以外のUri）
-        val isFileRequest = imageUri != null && !isOcrRequest && !isTableRequest &&
-                !isEnhanceRequest && !isZoomRequest && isFileUri(imageUri)
-
-        val needsEngine = !isOcrRequest && !isTableRequest && !isEnhanceRequest &&
-                !isZoomRequest && !isFileRequest
-
-        if (needsEngine && !_uiState.value.isEngineReady) {
-            addMessage(
-                ChatMessage(
-                    role = ChatMessage.Role.ASSISTANT,
-                    text = "エンジンがロードされていません。「エンジンをロード」ボタンを押してからテキスト送信してください。\n\n" +
-                            "エンジンなしで利用可能: 画像OCR、表復元、高画質化、PDF解析、CSV/Excel解析"
-                )
-            )
-            return
-        }
-
-        // ズーム要求 → 範囲選択モード
-        if (isZoomRequest) {
-            enterCropMode(imageUri!!, CropPurpose.ZOOM)
-            return
-        }
-
-        // 高画質化要求 → 範囲選択モード
-        if (isEnhanceRequest) {
-            enterCropMode(imageUri!!, CropPurpose.ENHANCE)
-            return
-        }
-
-        val processingLabel = when {
-            isTableRequest -> "表構造を復元中..."
-            isOcrRequest -> "テキスト読み取り中..."
-            isFileRequest -> "ファイルを解析中..."
-            imageUri != null -> "画像を分析中..."
-            else -> "考え中..."
-        }
-
-        val processingId = addProcessingMessage(processingLabel)
-
-        viewModelScope.launch {
-            try {
-                val response = when {
-                    isTableRequest -> processTableRequest(imageUri!!)
-                    isOcrRequest -> processOcrRequest(imageUri!!)
-                    isFileRequest -> processFileRequest(imageUri!!)
-                    imageUri != null -> processImageMessage(imageUri, displayText)
-                    else -> processTextMessage(displayText)
-                }
-
-                replaceMessage(
-                    processingId,
-                    ChatMessage(id = processingId, role = ChatMessage.Role.ASSISTANT, text = response)
-                )
-            } catch (e: Exception) {
-                Log.e(TAG, "Message processing failed", e)
-                replaceMessage(
-                    processingId,
-                    ChatMessage(id = processingId, role = ChatMessage.Role.ASSISTANT, text = "エラーが発生しました: ${e.message}")
-                )
             }
         }
     }
 
     /**
-     * Uri がファイル（PDF/CSV/XLSX/ソースコード等）かどうかを判定する
+     * Intent からデータを解析する。
+     *
+     * 判定の優先順位:
+     *   1. EXTRA_STREAM に URI があり、拡張子または MIME がファイル系 → FileData
+     *   2. image/* → SingleImage / MultipleImages
+     *   3. EXTRA_TEXT に文字列がある → TextData
+     *   4. EXTRA_STREAM に URI があるがファイル判定できない → FileData (fallback)
+     *   5. 何もない → Empty
      */
-    private fun isFileUri(uri: Uri): Boolean {
-        val mimeType = app.contentResolver.getType(uri) ?: ""
-        val path = uri.toString().lowercase()
-        return mimeType.contains("pdf") || mimeType.contains("csv") ||
-                mimeType.contains("spreadsheetml") || mimeType.contains("xlsx") ||
-                mimeType.startsWith("text/") ||
-                path.endsWith(".pdf") || path.endsWith(".csv") || path.endsWith(".xlsx") ||
-                path.endsWith(".kt") || path.endsWith(".java") || path.endsWith(".py") ||
-                path.endsWith(".js") || path.endsWith(".ts") || path.endsWith(".json") ||
-                path.endsWith(".xml") || path.endsWith(".yaml") || path.endsWith(".yml") ||
-                path.endsWith(".md") || path.endsWith(".html") || path.endsWith(".css") ||
-                path.endsWith(".sql") || path.endsWith(".sh") || path.endsWith(".c") ||
-                path.endsWith(".cpp") || path.endsWith(".h") || path.endsWith(".swift") ||
-                path.endsWith(".go") || path.endsWith(".rs") || path.endsWith(".dart")
-    }
+    private fun parseIntent(intent: Intent): ReceivedData {
+        val action = intent.action
+        val type = intent.type ?: ""
 
-    /** ズーム/高画質化要求時に範囲選択モードに入る */
-    private fun enterCropMode(uri: Uri, purpose: CropPurpose) {
-        viewModelScope.launch(Dispatchers.IO) {
-            val context = app.applicationContext
-            val imgSize = RegionDecoder.getImageSize(context, uri)
-            val thumbnail = RegionDecoder.decodeThumbnail(context, uri, 800)
+        Log.i(TAG, "Received: action=$action, type=$type")
 
-            if (imgSize == null || thumbnail == null) {
-                addMessage(
-                    ChatMessage(
-                        role = ChatMessage.Role.ASSISTANT,
-                        text = "⚠️ 画像を読み込めませんでした"
-                    )
-                )
-                return@launch
-            }
-
-            val (w, h) = imgSize
-            val actionText = when (purpose) {
-                CropPurpose.ENHANCE -> "高画質化したい範囲"
-                CropPurpose.ZOOM -> "拡大したい範囲"
-            }
-            addMessage(
-                ChatMessage(
-                    role = ChatMessage.Role.ASSISTANT,
-                    text = "画像上で${actionText}をドラッグで選択してください (${w}×${h})"
-                )
-            )
-
-            _uiState.value = _uiState.value.copy(
-                cropMode = true,
-                cropPurpose = purpose,
-                cropImageUri = uri,
-                cropThumbnail = thumbnail,
-                cropImageWidth = w,
-                cropImageHeight = h
-            )
+        if (action == Intent.ACTION_SEND_MULTIPLE && type.startsWith("image/")) {
+            val uris = intent.getParcelableArrayListExtra<Uri>(Intent.EXTRA_STREAM)
+            if (!uris.isNullOrEmpty()) return ReceivedData.MultipleImages(uris)
         }
+
+        if (action == Intent.ACTION_SEND) {
+            val streamUri = intent.getParcelableExtra<Uri>(Intent.EXTRA_STREAM)
+
+            // EXTRA_STREAM がある場合 → ファイルか画像かを判定
+            if (streamUri != null) {
+                // 実際の MIME タイプをContentResolverからも取得
+                val resolvedMime = contentResolver.getType(streamUri) ?: type
+                val filename = getFilename(streamUri)
+
+                Log.i(TAG, "Stream URI: $streamUri, resolvedMime=$resolvedMime, filename=$filename")
+
+                // 画像判定（かつファイル拡張子がソースコード等でない場合）
+                if (resolvedMime.startsWith("image/") && !hasFileExtension(filename)) {
+                    return ReceivedData.SingleImage(streamUri)
+                }
+
+                // ファイル判定（拡張子 or MIME タイプ）
+                if (hasFileExtension(filename) || hasFileMimeType(resolvedMime)) {
+                    return ReceivedData.FileData(streamUri, resolvedMime)
+                }
+
+                // 画像系 MIME なら画像として扱う
+                if (resolvedMime.startsWith("image/")) {
+                    return ReceivedData.SingleImage(streamUri)
+                }
+
+                // それ以外の EXTRA_STREAM は汎用ファイルとして扱う
+                return ReceivedData.FileData(streamUri, resolvedMime)
+            }
+
+            // EXTRA_STREAM がなく EXTRA_TEXT がある場合 → テキスト
+            val extraText = intent.getStringExtra(Intent.EXTRA_TEXT)
+            if (!extraText.isNullOrBlank()) {
+                return ReceivedData.TextData(extraText)
+            }
+        }
+
+        return ReceivedData.Empty
     }
 
-    // ── 選択領域ズーム処理 ──
+    /**
+     * URI からファイル名を取得する
+     */
+    private fun getFilename(uri: Uri): String {
+        // ContentResolver の DISPLAY_NAME を優先
+        try {
+            val cursor = contentResolver.query(
+                uri,
+                arrayOf(android.provider.MediaStore.MediaColumns.DISPLAY_NAME),
+                null, null, null
+            )
+            cursor?.use {
+                if (it.moveToFirst()) {
+                    val name = it.getString(0)
+                    if (!name.isNullOrBlank()) return name
+                }
+            }
+        } catch (e: Exception) {
+            Log.d(TAG, "Could not query display name: ${e.message}")
+        }
+        // fallback: URI の lastPathSegment
+        return uri.lastPathSegment ?: ""
+    }
 
-    private suspend fun processRegionZoom(
-        uri: Uri,
-        left: Float, top: Float, right: Float, bottom: Float,
-        imgW: Int, imgH: Int,
-        purpose: CropPurpose
-    ): String = withContext(Dispatchers.IO) {
-        val context = app.applicationContext
+    /**
+     * ファイル名がファイル解析対象の拡張子を持つか
+     */
+    private fun hasFileExtension(filename: String): Boolean {
+        val lower = filename.lowercase()
+        return FILE_EXTENSIONS.any { lower.endsWith(it) }
+    }
 
-        val regionBitmap = RegionDecoder.decodeRegion(
-            context, uri, left, top, right, bottom, maxOutputSide = 4096
-        ) ?: return@withContext "⚠️ 選択領域のデコードに失敗しました"
+    /**
+     * MIME タイプがファイル解析対象か
+     */
+    private fun hasFileMimeType(mimeType: String): Boolean {
+        val lower = mimeType.lowercase()
+        return FILE_MIME_PARTS.any { lower.contains(it) }
+    }
 
-        val safeCopy = if (regionBitmap.config != Bitmap.Config.ARGB_8888) {
-            val copy = regionBitmap.copy(Bitmap.Config.ARGB_8888, false)
-            regionBitmap.recycle()
-            copy ?: return@withContext "⚠️ コピーに失敗しました"
+    private suspend fun processReceivedData(data: ReceivedData): String =
+        withContext(Dispatchers.IO) {
+            when (data) {
+                is ReceivedData.TextData -> processText(data.text)
+                is ReceivedData.SingleImage -> processImage(data.uri)
+                is ReceivedData.MultipleImages -> processMultipleImages(data.uris)
+                is ReceivedData.FileData -> processFile(data.uri, data.mimeType)
+                is ReceivedData.Empty -> "共有データを受信できませんでした"
+            }
+        }
+
+    private suspend fun processText(text: String): String {
+        if (text.isBlank()) return "テキストが空です"
+
+        val engine = NexusEngineManager.getInstance()
+        return if (engine.state.value is EngineState.Ready) {
+            val result = engine.inferText("以下のテキストを簡潔に要約してください:\n\n$text")
+            result.getOrElse {
+                "エンジンエラー: ${it.message}\n\n元テキスト:\n$text"
+            }
         } else {
-            regionBitmap
-        }
-
-        val result = routeC?.process(safeCopy)
-
-        if (result != null && result.success) {
-            val savePrefix = when (purpose) {
-                CropPurpose.ENHANCE -> "Enhanced"
-                CropPurpose.ZOOM -> "Zoom"
-            }
-            val resultLabel = when (purpose) {
-                CropPurpose.ENHANCE -> "✅ 高画質化完了"
-                CropPurpose.ZOOM -> "✅ デジタルズーム完了"
-            }
-
-            val savedUri = saveBitmapToGallery(result.bitmap, savePrefix)
-            val responseText = buildString {
-                appendLine("${resultLabel} (${result.method})")
-                appendLine("📐 元画像: ${imgW}×${imgH}")
-                appendLine("📐 選択範囲: ${safeCopy.width}×${safeCopy.height}")
-                appendLine("📐 出力: ${result.bitmap.width}×${result.bitmap.height}")
-                appendLine("⏱ ${result.timeMs}ms")
-                if (savedUri != null) {
-                    appendLine("📁 Pictures/NexusVision/ に保存")
-                }
-            }
-            safeCopy.recycle()
-            result.bitmap.recycle()
-            responseText
-        } else {
-            safeCopy.recycle()
-            "⚠️ 選択範囲の超解像に失敗しました"
+            "【共有テキスト受信】\n\n$text\n\n" +
+                    "(エンジン未ロードのため要約はスキップされました。" +
+                    "メインアプリでエンジンをロードしてから再度共有してください)"
         }
     }
 
-    // ── テキスト処理 ──
-
-    private suspend fun processTextMessage(text: String): String {
-        val cached = l2Cache.lookup(text)
-        if (cached != null) return cached.responseText
-
-        val result = engineManager.inferText(text)
-        return result.getOrElse { throw it }.also { response ->
-            l2Cache.put(text, response)
+    private suspend fun processImage(uri: Uri): String {
+        val ocrEngine = MlKitOcrEngine()
+        return try {
+            val result = ocrEngine.recognizeFromUri(applicationContext, uri)
+            if (result.isNotBlank()) {
+                "【テキスト読み取り結果】\n\n$result"
+            } else {
+                "テキストを検出できませんでした"
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "OCR failed", e)
+            "OCR エラー: ${e.message}"
+        } finally {
+            ocrEngine.close()
         }
     }
 
-    // ── 画像処理（DEOR 連携） ──
-
-    private suspend fun processImageMessage(uri: Uri, text: String): String =
-        withContext(Dispatchers.IO) {
-            val context = app.applicationContext
-
-            val inputStream = context.contentResolver.openInputStream(uri)
-                ?: throw IllegalStateException("画像を開けません")
-            val originalBitmap = BitmapFactory.decodeStream(inputStream)
-            inputStream.close()
-
-            if (originalBitmap == null) throw IllegalStateException("画像のデコードに失敗しました")
-
-            val pHash = PHashCalculator.calculate(originalBitmap)
-
-            val cachedEntry = l1Cache.lookup(pHash, category = "classify")
-            if (cachedEntry != null) {
-                originalBitmap.recycle()
-                return@withContext cachedEntry.resultText
-            }
-
-            val resizeResult = AdaptiveResizer.resize(originalBitmap)
-
-            val tempFile = saveBitmapToTemp(context, resizeResult.bitmap)
-
-            if (resizeResult.bitmap !== originalBitmap) {
-                resizeResult.bitmap.recycle()
-            }
-            originalBitmap.recycle()
-
-            val result = engineManager.inferImage(tempFile.absolutePath, text)
-            val response = result.getOrElse {
-                tempFile.delete()
-                throw it
-            }
-
-            l1Cache.put(
-                pHash = pHash,
-                resultText = response,
-                category = "classify",
-                entropy = resizeResult.entropy
-            )
-
-            tempFile.delete()
-            response
-        }
-
-    // ── OCR 処理 ──
-
-    private suspend fun processOcrRequest(uri: Uri): String =
-        withContext(Dispatchers.IO) {
-            val context = app.applicationContext
-
-            val sizeStream = context.contentResolver.openInputStream(uri)
-                ?: throw IllegalStateException("画像を開けません")
-            val (width, height) = DirectCrop100MP.getImageDimensions(sizeStream)
-            sizeStream.close()
-
-            val caseType = DocumentSharpener.detectCase(width, height)
-            Log.d(TAG, "OCR: image=${width}x${height} → Case $caseType")
-
-            val result = if (caseType == "A") {
-                val stream = context.contentResolver.openInputStream(uri)
-                    ?: throw IllegalStateException("画像を開けません")
-                val docResult = DocumentSharpener.processCaseA(stream, ocrEngine)
-                stream.close()
-                docResult
-            } else {
-                val coarseStream = context.contentResolver.openInputStream(uri)
-                    ?: throw IllegalStateException("画像を開けません")
-                val cropStream = context.contentResolver.openInputStream(uri)
-                    ?: throw IllegalStateException("画像を開けません")
-                val docResult = DocumentSharpener.processCaseB(coarseStream, cropStream, ocrEngine)
-                coarseStream.close()
-                cropStream.close()
-                docResult
-            }
-
-            if (result.fullText.isBlank()) {
-                "テキストを検出できませんでした。"
-            } else {
-                buildString {
-                    appendLine("【テキスト読み取り結果】(${result.pipeline}, ${result.processingTimeMs}ms)")
-                    appendLine()
-                    append(result.fullText)
-                }
-            }
-        }
-
-    // ── 表復元処理 (Phase 9) ──
-
-    private suspend fun processTableRequest(uri: Uri): String =
-        withContext(Dispatchers.IO) {
-            val context = app.applicationContext
-
-            // 1. 画像を読み込み
-            val inputStream = context.contentResolver.openInputStream(uri)
-                ?: throw IllegalStateException("画像を開けません")
-            val bitmap = BitmapFactory.decodeStream(inputStream)
-            inputStream.close()
-
-            if (bitmap == null) throw IllegalStateException("画像のデコードに失敗しました")
-
-            // 2. OCR 実行（座標情報付き）
-            val ocrResult = ocrEngine.recognize(bitmap)
-            bitmap.recycle()
-
-            if (ocrResult.fullText.isBlank()) {
-                return@withContext "テキストを検出できませんでした。表が含まれる画像を選択してください。"
-            }
-
-            // 3. テーブル構造を復元
-            val tableResult = TableReconstructor.reconstruct(ocrResult)
-
-            if (!tableResult.isTable) {
-                // テーブルとして認識できなかった場合、通常のテキストとして返す
-                return@withContext buildString {
-                    appendLine("【テキスト読み取り結果】(表構造は検出されませんでした)")
-                    appendLine()
-                    append(ocrResult.fullText)
-                }
-            }
-
-            // 4. 結果をフォーマット
-            buildString {
-                appendLine("【表復元結果】${tableResult.rowCount} 行 × ${tableResult.colCount} 列 (${tableResult.processingTimeMs}ms)")
-                appendLine()
-                appendLine("▼ Markdown テーブル:")
-                appendLine(tableResult.toMarkdown())
-                appendLine()
-                appendLine("▼ CSV:")
-                appendLine(tableResult.toCsv())
-            }
-        }
-
-    // ── ファイル解析処理 (Phase 8) ──
-
-    private suspend fun processFileRequest(uri: Uri): String =
-        withContext(Dispatchers.IO) {
-            val context = app.applicationContext
-            val mimeType = context.contentResolver.getType(uri) ?: ""
-            val filename = uri.lastPathSegment ?: ""
-
-            Log.i(TAG, "File request: mime=$mimeType, filename=$filename")
-
-            when {
-                // PDF
-                mimeType.contains("pdf") || filename.endsWith(".pdf", ignoreCase = true) -> {
-                    val result = PdfExtractor.extractFromUri(context, uri)
-                    if (result.isSuccess) {
-                        result.toSummaryText()
-                    } else {
-                        result.errorMessage ?: "PDF 解析失敗"
-                    }
-                }
-
-                // CSV / Excel
-                mimeType.contains("csv") || mimeType.contains("spreadsheetml") ||
-                        mimeType.contains("xlsx") ||
-                        filename.endsWith(".csv", ignoreCase = true) ||
-                        filename.endsWith(".xlsx", ignoreCase = true) -> {
-                    val result = ExcelCsvParser.parseFromUri(context, uri, mimeType)
-                    if (result.isSuccess) {
-                        buildString {
-                            appendLine("【${result.format} 解析結果】${result.rowCount} 行 × ${result.colCount} 列 (${result.processingTimeMs}ms)")
-                            appendLine()
-                            appendLine(result.toMarkdown())
-                        }
-                    } else {
-                        result.errorMessage ?: "ファイル解析失敗"
-                    }
-                }
-
-                // ソースコード
-                else -> {
-                    val result = SourceCodeParser.parseFromUri(context, uri, mimeType)
-                    if (result.isSuccess) {
-                        result.toSummaryText()
-                    } else {
-                        result.errorMessage ?: "ファイル解析失敗"
-                    }
-                }
-            }
-        }
-
-    // ── 超解像処理 ──
-
-    private suspend fun processEnhanceRequest(uri: Uri): String =
-        withContext(Dispatchers.IO) {
-            val context = app.applicationContext
-
-            val imgSize = RegionDecoder.getImageSize(context, uri)
-                ?: return@withContext "⚠️ 画像サイズを取得できません"
-            val (origW, origH) = imgSize
-
-            val maxOutputPixels = 4096L * 4096
-            val origPixels = origW.toLong() * origH
-
-            val maxDecodeSide = if (origPixels <= maxOutputPixels) {
-                maxOf(origW, origH)
-            } else {
-                4096
-            }
-
-            Log.i(TAG, "Enhance: original=${origW}x${origH}, maxDecode=$maxDecodeSide")
-
-            val decoded = RegionDecoder.decodeSafe(context, uri, maxDecodeSide)
-                ?: return@withContext "⚠️ 画像のデコードに失敗しました"
-
-            val safeCopy = if (decoded.config != Bitmap.Config.ARGB_8888) {
-                val copy = decoded.copy(Bitmap.Config.ARGB_8888, false)
-                decoded.recycle()
-                copy ?: return@withContext "⚠️ コピーに失敗しました"
-            } else {
-                decoded
-            }
-
-            Log.i(TAG, "Decoded: ${safeCopy.width}x${safeCopy.height}")
-
-            val result = routeC?.process(safeCopy)
-
-            if (result != null && result.success) {
-                val savedUri = saveBitmapToGallery(result.bitmap, "Enhanced")
-                val responseText = buildString {
-                    appendLine("✅ 高画質化完了 (${result.method})")
-                    appendLine("📐 元画像: ${origW}×${origH}")
-                    appendLine("📐 処理入力: ${safeCopy.width}×${safeCopy.height}")
-                    appendLine("📐 出力: ${result.bitmap.width}×${result.bitmap.height}")
-                    appendLine("⏱ ${result.timeMs}ms")
-                    if (savedUri != null) {
-                        appendLine("📁 Pictures/NexusVision/ に保存")
-                    }
-                    if (origPixels > maxOutputPixels) {
-                        appendLine()
-                        appendLine("💡 この画像は非常に大きいため、4096pxに制限して処理しました")
-                        appendLine("💡 部分拡大は「ズーム」で範囲選択すると元解像度で鮮明に処理できます")
-                    }
-                }
-                safeCopy.recycle()
-                result.bitmap.recycle()
-                responseText
-            } else {
-                val savedUri = saveBitmapToGallery(safeCopy, "Original")
-                safeCopy.recycle()
-                buildString {
-                    appendLine("⚠️ 高画質化に失敗しました")
-                    appendLine("元画像をそのまま保存しました")
-                    if (savedUri != null) appendLine("📁 Pictures/NexusVision/ に保存済")
-                }
-            }
-        }
-
-    // ── ヘルパー ──
-
-    private fun saveBitmapToGalleryStreaming(bitmap: Bitmap, prefix: String = "NEXUS", quality: Int = 95): Uri? {
-        val context = app.applicationContext
-        val timestamp = SimpleDateFormat("yyyyMMdd_HHmmss_SSS", Locale.US).format(Date())
-        val filename = "${prefix}_${timestamp}.jpg"
-
-        val contentValues = ContentValues().apply {
-            put(MediaStore.Images.Media.DISPLAY_NAME, filename)
-            put(MediaStore.Images.Media.MIME_TYPE, "image/jpeg")
-            put(MediaStore.Images.Media.RELATIVE_PATH, Environment.DIRECTORY_PICTURES + "/NexusVision")
-            put(MediaStore.Images.Media.IS_PENDING, 1)
-        }
-
-        val resolver = context.contentResolver
-        val uri = resolver.insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, contentValues) ?: return null
+    private suspend fun processMultipleImages(uris: List<Uri>): String {
+        val ocrEngine = MlKitOcrEngine()
+        val results = StringBuilder()
 
         try {
-            resolver.openFileDescriptor(uri, "w")?.use { pfd ->
-                val fd = pfd.detachFd()
-                val ctx = RealEsrganBridge.nativeJpegBeginWrite(fd, bitmap.width, bitmap.height, quality)
-                if (ctx != 0L) {
-                    val batchRows = 64
-                    for (row in 0 until bitmap.height step batchRows) {
-                        val numRows = if (row + batchRows > bitmap.height) bitmap.height - row else batchRows
-                        RealEsrganBridge.nativeJpegWriteRows(ctx, bitmap, row, numRows)
+            for ((index, uri) in uris.withIndex()) {
+                results.appendLine("--- 画像 ${index + 1}/${uris.size} ---")
+                try {
+                    val text = ocrEngine.recognizeFromUri(applicationContext, uri)
+                    if (text.isNotBlank()) {
+                        results.appendLine(text)
+                    } else {
+                        results.appendLine("(テキスト未検出)")
                     }
-                    RealEsrganBridge.nativeJpegEndWrite(ctx)
+                } catch (e: Exception) {
+                    results.appendLine("(エラー: ${e.message})")
+                }
+                results.appendLine()
+            }
+        } finally {
+            ocrEngine.close()
+        }
+
+        return results.toString().ifBlank { "テキストを検出できませんでした" }
+    }
+
+    /**
+     * ファイル処理（Phase 8 統合）
+     * MIME タイプ / ファイル名でパーサーを振り分ける
+     */
+    private suspend fun processFile(uri: Uri, mimeType: String): String {
+        val filename = getFilename(uri)
+        val resolvedMime = mimeType.ifBlank { contentResolver.getType(uri) ?: "" }
+        val lowerFilename = filename.lowercase()
+
+        Log.i(TAG, "processFile: mime=$resolvedMime, filename=$filename")
+
+        return when {
+            // CSV
+            resolvedMime.contains("csv") || resolvedMime.contains("comma-separated") ||
+                    lowerFilename.endsWith(".csv") -> {
+                val result = ExcelCsvParser.parseFromUri(applicationContext, uri, resolvedMime)
+                if (result.isSuccess) {
+                    "【CSV 解析結果】\n${result.rowCount} 行 × ${result.colCount} 列 (${result.processingTimeMs}ms)\n\n" +
+                            result.toMarkdown()
+                } else {
+                    result.errorMessage ?: "CSV 解析失敗"
                 }
             }
 
-            contentValues.clear()
-            contentValues.put(MediaStore.Images.Media.IS_PENDING, 0)
-            resolver.update(uri, contentValues, null, null)
-            Log.i(TAG, "Streaming saved to gallery: $filename (uri=$uri)")
-            return uri
-        } catch (e: Exception) {
-            Log.e(TAG, "Streaming save failed: ${e.message}")
-            resolver.delete(uri, null, null)
-            return null
-        }
-    }
-
-    private fun saveBitmapToGallery(bitmap: Bitmap, prefix: String = "NEXUS"): Uri? {
-        if (bitmap.width * bitmap.height > 4096 * 4096) {
-            Log.i(TAG, "Using streaming save for large image (${bitmap.width}x${bitmap.height})")
-            return saveBitmapToGalleryStreaming(bitmap, prefix)
-        }
-
-        val context = app.applicationContext
-        val timestamp = SimpleDateFormat("yyyyMMdd_HHmmss_SSS", Locale.US).format(Date())
-        val filename = "${prefix}_${timestamp}.jpg"
-
-        val contentValues = ContentValues().apply {
-            put(MediaStore.Images.Media.DISPLAY_NAME, filename)
-            put(MediaStore.Images.Media.MIME_TYPE, "image/jpeg")
-            put(MediaStore.Images.Media.RELATIVE_PATH, Environment.DIRECTORY_PICTURES + "/NexusVision")
-            put(MediaStore.Images.Media.IS_PENDING, 1)
-        }
-
-        val resolver = context.contentResolver
-        val uri = resolver.insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, contentValues)
-
-        if (uri != null) {
-            try {
-                resolver.openOutputStream(uri)?.use { outputStream ->
-                    bitmap.compress(Bitmap.CompressFormat.JPEG, 95, outputStream)
+            // Excel (.xlsx)
+            resolvedMime.contains("spreadsheetml") || resolvedMime.contains("xlsx") ||
+                    resolvedMime.contains("excel") ||
+                    lowerFilename.endsWith(".xlsx") || lowerFilename.endsWith(".xls") -> {
+                val result = ExcelCsvParser.parseFromUri(applicationContext, uri, resolvedMime)
+                if (result.isSuccess) {
+                    "【Excel 解析結果】\n${result.rowCount} 行 × ${result.colCount} 列 (${result.processingTimeMs}ms)\n\n" +
+                            result.toMarkdown()
+                } else {
+                    result.errorMessage ?: "Excel 解析失敗"
                 }
-                contentValues.clear()
-                contentValues.put(MediaStore.Images.Media.IS_PENDING, 0)
-                resolver.update(uri, contentValues, null, null)
-                Log.i(TAG, "Saved to gallery: $filename (uri=$uri)")
-                return uri
-            } catch (e: IOException) {
-                Log.e(TAG, "Failed to save to gallery: ${e.message}")
-                resolver.delete(uri, null, null)
+            }
+
+            // PDF
+            resolvedMime.contains("pdf") || lowerFilename.endsWith(".pdf") -> {
+                val result = PdfExtractor.extractFromUri(applicationContext, uri)
+                if (result.isSuccess) {
+                    result.toSummaryText()
+                } else {
+                    result.errorMessage ?: "PDF 解析失敗"
+                }
+            }
+
+            // ソースコード / テキスト系ファイル
+            resolvedMime.startsWith("text/") ||
+                    resolvedMime.contains("octet-stream") ||
+                    lowerFilename.endsWith(".kt") || lowerFilename.endsWith(".kts") ||
+                    lowerFilename.endsWith(".java") || lowerFilename.endsWith(".py") ||
+                    lowerFilename.endsWith(".js") || lowerFilename.endsWith(".ts") ||
+                    lowerFilename.endsWith(".c") || lowerFilename.endsWith(".cpp") ||
+                    lowerFilename.endsWith(".h") || lowerFilename.endsWith(".hpp") ||
+                    lowerFilename.endsWith(".swift") || lowerFilename.endsWith(".go") ||
+                    lowerFilename.endsWith(".rs") || lowerFilename.endsWith(".dart") ||
+                    lowerFilename.endsWith(".json") || lowerFilename.endsWith(".xml") ||
+                    lowerFilename.endsWith(".yaml") || lowerFilename.endsWith(".yml") ||
+                    lowerFilename.endsWith(".md") || lowerFilename.endsWith(".sh") ||
+                    lowerFilename.endsWith(".sql") || lowerFilename.endsWith(".html") ||
+                    lowerFilename.endsWith(".css") || lowerFilename.endsWith(".gradle") ||
+                    lowerFilename.endsWith(".toml") || lowerFilename.endsWith(".properties") -> {
+                val result = SourceCodeParser.parseFromUri(applicationContext, uri, resolvedMime)
+                if (result.isSuccess) {
+                    result.toSummaryText()
+                } else {
+                    result.errorMessage ?: "ファイル解析失敗"
+                }
+            }
+
+            else -> {
+                "非対応ファイル形式: $resolvedMime ($filename)\n\n" +
+                        "対応形式: CSV, Excel(.xlsx), PDF, ソースコード(.kt .java .py .js 等), 画像(OCR)"
             }
         }
-        return null
     }
 
-    private fun saveBitmapToTemp(context: Context, bitmap: Bitmap): File {
-        val tempFile = File(context.cacheDir, "nexus_temp_${System.currentTimeMillis()}.jpg")
-        FileOutputStream(tempFile).use { out ->
-            bitmap.compress(Bitmap.CompressFormat.JPEG, 90, out)
-        }
-        return tempFile
-    }
-
-    private fun addMessage(message: ChatMessage) {
-        _uiState.value = _uiState.value.copy(
-            messages = _uiState.value.messages + message
-        )
-    }
-
-    fun startBatchEnhance(uris: List<Uri>) {
-        if (uris.isEmpty()) return
-
-        addMessage(
-            ChatMessage(
-                role = ChatMessage.Role.USER,
-                text = "バッチ高画質化: ${uris.size} 枚"
-            )
-        )
-
-        val processingId = addProcessingMessage("🔄 バッチ高画質化を開始します (${uris.size} 枚)...")
-        batchProgressMessageId = processingId
-
-        val displayNames = uris.map { uri ->
-            try {
-                val cursor = app.contentResolver.query(
-                    uri,
-                    arrayOf(android.provider.MediaStore.Images.Media.DISPLAY_NAME),
-                    null, null, null
-                )
-                cursor?.use {
-                    if (it.moveToFirst()) it.getString(0) else "image.jpg"
-                } ?: "image.jpg"
-            } catch (e: Exception) {
-                "image.jpg"
-            }
-        }
-
-        BatchEnhanceQueue.enqueue(uris, displayNames)
-
-        val workRequest = OneTimeWorkRequestBuilder<BatchEnhanceWorker>().build()
-        WorkManager.getInstance(app.applicationContext)
-            .enqueueUniqueWork(
-                BatchEnhanceWorker.WORK_NAME,
-                ExistingWorkPolicy.REPLACE,
-                workRequest
-            )
-
-        Log.i(TAG, "Batch enhance started: ${uris.size} images")
-    }
-
-    fun consumeBatchPickerRequest() {
-        _uiState.value = _uiState.value.copy(requestBatchPicker = false)
-    }
-
-    private fun addSystemMessage(text: String) {
-        addMessage(ChatMessage(role = ChatMessage.Role.SYSTEM, text = text))
-    }
-
-    private fun addProcessingMessage(label: String): String {
-        val message = ChatMessage(
-            role = ChatMessage.Role.ASSISTANT,
-            text = "",
-            isProcessing = true,
-            processingLabel = label
-        )
-        addMessage(message)
-        return message.id
-    }
-
-    private fun replaceMessage(id: String, newMessage: ChatMessage) {
-        _uiState.value = _uiState.value.copy(
-            messages = _uiState.value.messages.map {
-                if (it.id == id) newMessage else it
-            }
-        )
+    sealed class ReceivedData {
+        data class TextData(val text: String) : ReceivedData()
+        data class SingleImage(val uri: Uri) : ReceivedData()
+        data class MultipleImages(val uris: List<Uri>) : ReceivedData()
+        data class FileData(val uri: Uri, val mimeType: String) : ReceivedData()
+        data object Empty : ReceivedData()
     }
 }
 ```
 
----
+### 変更点まとめ
 
-### 変更ポイントまとめ（MainViewModel.kt）
+`parseIntent()` を完全に書き直しました。旧版では `text/*` を全て `EXTRA_TEXT` 文字列として処理していましたが、新版では `EXTRA_STREAM` に URI がある場合はまず `ContentResolver` でファイル名を取得し、拡張子とMIMEタイプでファイル系かどうかを判定します。`.kt` ファイルが `text/plain` で来ても、拡張子 `.kt` が `FILE_EXTENSIONS` に含まれるため `FileData` として正しく分類されます。`.xlsx` が `application/octet-stream` で来ても、拡張子 `.xlsx` で判定されます。
 
-追加した import は `TableReconstructor`, `ExcelCsvParser`, `PdfExtractor`, `SourceCodeParser` の4つ。`sendMessage()` に `isTableRequest`（「表」「テーブル」「table」「CSV」「Markdown」キーワード）と `isFileRequest`（PDF/CSV/XLSX/ソースコードの MIME タイプ・拡張子判定）の2つの新しいコマンド判定を追加。新規メソッド `processTableRequest()` は画像を OCR → `TableReconstructor.reconstruct()` → Markdown テーブル + CSV で結果を返す。新規メソッド `processFileRequest()` は URI の MIME タイプで PDF/CSV/XLSX/ソースコードを振り分け、各パーサーを呼び出す。新規メソッド `isFileUri()` は URI がファイル系かどうかを MIME タイプと拡張子で判定。ウェルカムメッセージを「画像・PDF・CSV・テキストを送信できます」に更新。エンジン未ロード時のメッセージに「PDF解析、CSV/Excel解析」を追加。既存の OCR/高画質化/ズーム/バッチ処理のコードは完全に保持。
+`getFilename()` メソッドを追加し、`ContentResolver` の `DISPLAY_NAME` カラムから正確なファイル名を取得します。`uri.lastPathSegment` だけではエンコードされたパスや content URI で正しいファイル名が取れないことがあるため。
 
-### ビルド・テスト手順
+`processFile()` 内でも `getFilename()` を使い、`uri.lastPathSegment` の代わりに正確なファイル名で拡張子判定するように変更。`application/octet-stream` をソースコード/テキスト系のフォールバックとして処理するよう追加。
 
-1. 新規4ファイル（ExcelCsvParser.kt, SourceCodeParser.kt, PdfExtractor.kt, TableReconstructor.kt）を作成
-2. ShareReceiver.kt を更新版で置換
-3. MainViewModel.kt を更新版で置換
-4. `Build > Rebuild Project`
-5. テスト:
-   - チャットで画像を選択して「表」と送信 → 表復元（Markdown + CSV）
-   - チャットで画像を選択して空送信 → 通常 OCR（従来通り）
-   - 他アプリから PDF を共有 → ページごとの OCR テキスト
-   - 他アプリから CSV/XLSX を共有 → Markdown テーブル
-   - 他アプリから .kt ファイルを共有 → 構造解析
+### 変更対象は1ファイルのみ
+他のファイル（ExcelCsvParser.kt, SourceCodeParser.kt, PdfExtractor.kt, TableReconstructor.kt, MainViewModel.kt）は変更なし。
+
+### テスト手順
+1. `ShareReceiver.kt` を上記で置換
+2. `Build > Rebuild Project`
+3. ファイルマネージャーから `.kt` ファイルを共有 → 「NEXUS Vision で処理」→ 構造解析結果が表示される
+4. ファイルマネージャーから `.xlsx` ファイルを共有 → Markdown テーブルが表示される
+5. ファイルマネージャーから `.csv` ファイルを共有 → Markdown テーブルが表示される

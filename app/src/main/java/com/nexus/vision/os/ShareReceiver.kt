@@ -47,6 +47,25 @@ class ShareReceiver : ComponentActivity() {
 
     companion object {
         private const val TAG = "ShareReceiver"
+
+        /** ファイルとして解析すべき拡張子一覧 */
+        private val FILE_EXTENSIONS = setOf(
+            ".csv", ".xlsx", ".xls", ".pdf",
+            ".kt", ".kts", ".java", ".py", ".js", ".ts", ".jsx", ".tsx",
+            ".c", ".cpp", ".cc", ".cxx", ".h", ".hpp",
+            ".swift", ".go", ".rs", ".dart", ".rb",
+            ".json", ".xml", ".yaml", ".yml",
+            ".md", ".sh", ".bash", ".sql",
+            ".html", ".htm", ".css", ".scss",
+            ".gradle", ".toml", ".properties", ".cfg", ".ini", ".conf"
+        )
+
+        /** ファイルとして解析すべき MIME タイプの部分文字列 */
+        private val FILE_MIME_PARTS = setOf(
+            "pdf", "csv", "comma-separated",
+            "spreadsheetml", "xlsx", "excel",
+            "octet-stream"
+        )
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -104,44 +123,105 @@ class ShareReceiver : ComponentActivity() {
         }
     }
 
+    /**
+     * Intent からデータを解析する。
+     *
+     * 判定の優先順位:
+     *   1. EXTRA_STREAM に URI があり、拡張子または MIME がファイル系 → FileData
+     *   2. image (MIME) → SingleImage / MultipleImages
+     *   3. EXTRA_TEXT に文字列がある → TextData
+     *   4. EXTRA_STREAM に URI があるがファイル判定できない → FileData (fallback)
+     *   5. 何もない → Empty
+     */
     private fun parseIntent(intent: Intent): ReceivedData {
         val action = intent.action
         val type = intent.type ?: ""
 
         Log.i(TAG, "Received: action=$action, type=$type")
 
-        return when {
-            action == Intent.ACTION_SEND && type.startsWith("text/") -> {
-                // text/plain はテキスト、text/csv は CSV として扱う
-                if (type.contains("csv")) {
-                    val uri = intent.getParcelableExtra<Uri>(Intent.EXTRA_STREAM)
-                    if (uri != null) ReceivedData.FileData(uri, type)
-                    else {
-                        val text = intent.getStringExtra(Intent.EXTRA_TEXT) ?: ""
-                        ReceivedData.TextData(text)
-                    }
-                } else {
-                    val text = intent.getStringExtra(Intent.EXTRA_TEXT) ?: ""
-                    ReceivedData.TextData(text)
+        if (action == Intent.ACTION_SEND_MULTIPLE && type.startsWith("image/")) {
+            val uris = intent.getParcelableArrayListExtra<Uri>(Intent.EXTRA_STREAM)
+            if (!uris.isNullOrEmpty()) return ReceivedData.MultipleImages(uris)
+        }
+
+        if (action == Intent.ACTION_SEND) {
+            val streamUri = intent.getParcelableExtra<Uri>(Intent.EXTRA_STREAM)
+
+            // EXTRA_STREAM がある場合 → ファイルか画像かを判定
+            if (streamUri != null) {
+                // 実際の MIME タイプをContentResolverからも取得
+                val resolvedMime = contentResolver.getType(streamUri) ?: type
+                val filename = getFilename(streamUri)
+
+                Log.i(TAG, "Stream URI: $streamUri, resolvedMime=$resolvedMime, filename=$filename")
+
+                // 画像判定（かつファイル拡張子がソースコード等でない場合）
+                if (resolvedMime.startsWith("image/") && !hasFileExtension(filename)) {
+                    return ReceivedData.SingleImage(streamUri)
+                }
+
+                // ファイル判定（拡張子 or MIME タイプ）
+                if (hasFileExtension(filename) || hasFileMimeType(resolvedMime)) {
+                    return ReceivedData.FileData(streamUri, resolvedMime)
+                }
+
+                // 画像系 MIME なら画像として扱う
+                if (resolvedMime.startsWith("image/")) {
+                    return ReceivedData.SingleImage(streamUri)
+                }
+
+                // それ以外の EXTRA_STREAM は汎用ファイルとして扱う
+                return ReceivedData.FileData(streamUri, resolvedMime)
+            }
+
+            // EXTRA_STREAM がなく EXTRA_TEXT がある場合 → テキスト
+            val extraText = intent.getStringExtra(Intent.EXTRA_TEXT)
+            if (!extraText.isNullOrBlank()) {
+                return ReceivedData.TextData(extraText)
+            }
+        }
+
+        return ReceivedData.Empty
+    }
+
+    /**
+     * URI からファイル名を取得する
+     */
+    private fun getFilename(uri: Uri): String {
+        // ContentResolver の DISPLAY_NAME を優先
+        try {
+            val cursor = contentResolver.query(
+                uri,
+                arrayOf(android.provider.MediaStore.MediaColumns.DISPLAY_NAME),
+                null, null, null
+            )
+            cursor?.use {
+                if (it.moveToFirst()) {
+                    val name = it.getString(0)
+                    if (!name.isNullOrBlank()) return name
                 }
             }
-            action == Intent.ACTION_SEND && type.startsWith("image/") -> {
-                val uri = intent.getParcelableExtra<Uri>(Intent.EXTRA_STREAM)
-                if (uri != null) ReceivedData.SingleImage(uri)
-                else ReceivedData.Empty
-            }
-            action == Intent.ACTION_SEND_MULTIPLE && type.startsWith("image/") -> {
-                val uris = intent.getParcelableArrayListExtra<Uri>(Intent.EXTRA_STREAM)
-                if (!uris.isNullOrEmpty()) ReceivedData.MultipleImages(uris)
-                else ReceivedData.Empty
-            }
-            action == Intent.ACTION_SEND -> {
-                val uri = intent.getParcelableExtra<Uri>(Intent.EXTRA_STREAM)
-                if (uri != null) ReceivedData.FileData(uri, type)
-                else ReceivedData.Empty
-            }
-            else -> ReceivedData.Empty
+        } catch (e: Exception) {
+            Log.d(TAG, "Could not query display name: ${e.message}")
         }
+        // fallback: URI の lastPathSegment
+        return uri.lastPathSegment ?: ""
+    }
+
+    /**
+     * ファイル名がファイル解析対象の拡張子を持つか
+     */
+    private fun hasFileExtension(filename: String): Boolean {
+        val lower = filename.lowercase()
+        return FILE_EXTENSIONS.any { lower.endsWith(it) }
+    }
+
+    /**
+     * MIME タイプがファイル解析対象か
+     */
+    private fun hasFileMimeType(mimeType: String): Boolean {
+        val lower = mimeType.lowercase()
+        return FILE_MIME_PARTS.any { lower.contains(it) }
     }
 
     private suspend fun processReceivedData(data: ReceivedData): String =
@@ -219,14 +299,17 @@ class ShareReceiver : ComponentActivity() {
      * MIME タイプ / ファイル名でパーサーを振り分ける
      */
     private suspend fun processFile(uri: Uri, mimeType: String): String {
-        val filename = uri.lastPathSegment ?: ""
-        Log.i(TAG, "processFile: mime=$mimeType, filename=$filename")
+        val filename = getFilename(uri)
+        val resolvedMime = mimeType.ifBlank { contentResolver.getType(uri) ?: "" }
+        val lowerFilename = filename.lowercase()
+
+        Log.i(TAG, "processFile: mime=$resolvedMime, filename=$filename")
 
         return when {
             // CSV
-            mimeType.contains("csv") || mimeType.contains("comma-separated") ||
-                    filename.endsWith(".csv", ignoreCase = true) -> {
-                val result = ExcelCsvParser.parseFromUri(applicationContext, uri, mimeType)
+            resolvedMime.contains("csv") || resolvedMime.contains("comma-separated") ||
+                    lowerFilename.endsWith(".csv") -> {
+                val result = ExcelCsvParser.parseFromUri(applicationContext, uri, resolvedMime)
                 if (result.isSuccess) {
                     "【CSV 解析結果】\n${result.rowCount} 行 × ${result.colCount} 列 (${result.processingTimeMs}ms)\n\n" +
                             result.toMarkdown()
@@ -236,9 +319,10 @@ class ShareReceiver : ComponentActivity() {
             }
 
             // Excel (.xlsx)
-            mimeType.contains("spreadsheetml") || mimeType.contains("xlsx") ||
-                    filename.endsWith(".xlsx", ignoreCase = true) -> {
-                val result = ExcelCsvParser.parseFromUri(applicationContext, uri, mimeType)
+            resolvedMime.contains("spreadsheetml") || resolvedMime.contains("xlsx") ||
+                    resolvedMime.contains("excel") ||
+                    lowerFilename.endsWith(".xlsx") || lowerFilename.endsWith(".xls") -> {
+                val result = ExcelCsvParser.parseFromUri(applicationContext, uri, resolvedMime)
                 if (result.isSuccess) {
                     "【Excel 解析結果】\n${result.rowCount} 行 × ${result.colCount} 列 (${result.processingTimeMs}ms)\n\n" +
                             result.toMarkdown()
@@ -248,7 +332,7 @@ class ShareReceiver : ComponentActivity() {
             }
 
             // PDF
-            mimeType.contains("pdf") || filename.endsWith(".pdf", ignoreCase = true) -> {
+            resolvedMime.contains("pdf") || lowerFilename.endsWith(".pdf") -> {
                 val result = PdfExtractor.extractFromUri(applicationContext, uri)
                 if (result.isSuccess) {
                     result.toSummaryText()
@@ -257,30 +341,33 @@ class ShareReceiver : ComponentActivity() {
                 }
             }
 
-            // ソースコード (text/* のうち CSV 以外)
-            mimeType.startsWith("text/") ||
-                    filename.endsWith(".kt") || filename.endsWith(".java") ||
-                    filename.endsWith(".py") || filename.endsWith(".js") ||
-                    filename.endsWith(".ts") || filename.endsWith(".c") ||
-                    filename.endsWith(".cpp") || filename.endsWith(".h") ||
-                    filename.endsWith(".swift") || filename.endsWith(".go") ||
-                    filename.endsWith(".rs") || filename.endsWith(".dart") ||
-                    filename.endsWith(".json") || filename.endsWith(".xml") ||
-                    filename.endsWith(".yaml") || filename.endsWith(".yml") ||
-                    filename.endsWith(".md") || filename.endsWith(".sh") ||
-                    filename.endsWith(".sql") || filename.endsWith(".html") ||
-                    filename.endsWith(".css") -> {
-                val result = SourceCodeParser.parseFromUri(applicationContext, uri, mimeType)
+            // ソースコード / テキスト系ファイル
+            resolvedMime.startsWith("text/") ||
+                    resolvedMime.contains("octet-stream") ||
+                    lowerFilename.endsWith(".kt") || lowerFilename.endsWith(".kts") ||
+                    lowerFilename.endsWith(".java") || lowerFilename.endsWith(".py") ||
+                    lowerFilename.endsWith(".js") || lowerFilename.endsWith(".ts") ||
+                    lowerFilename.endsWith(".c") || lowerFilename.endsWith(".cpp") ||
+                    lowerFilename.endsWith(".h") || lowerFilename.endsWith(".hpp") ||
+                    lowerFilename.endsWith(".swift") || lowerFilename.endsWith(".go") ||
+                    lowerFilename.endsWith(".rs") || lowerFilename.endsWith(".dart") ||
+                    lowerFilename.endsWith(".json") || lowerFilename.endsWith(".xml") ||
+                    lowerFilename.endsWith(".yaml") || lowerFilename.endsWith(".yml") ||
+                    lowerFilename.endsWith(".md") || lowerFilename.endsWith(".sh") ||
+                    lowerFilename.endsWith(".sql") || lowerFilename.endsWith(".html") ||
+                    lowerFilename.endsWith(".css") || lowerFilename.endsWith(".gradle") ||
+                    lowerFilename.endsWith(".toml") || lowerFilename.endsWith(".properties") -> {
+                val result = SourceCodeParser.parseFromUri(applicationContext, uri, resolvedMime)
                 if (result.isSuccess) {
                     result.toSummaryText()
                 } else {
-                    result.errorMessage ?: "ソースコード解析失敗"
+                    result.errorMessage ?: "ファイル解析失敗"
                 }
             }
 
             else -> {
-                "非対応ファイル形式: $mimeType\n\n" +
-                        "対応形式: 画像(OCR)、テキスト(要約)、CSV、Excel(.xlsx)、PDF、ソースコード"
+                "非対応ファイル形式: $resolvedMime ($filename)\n\n" +
+                        "対応形式: CSV, Excel(.xlsx), PDF, ソースコード(.kt .java .py .js 等), 画像(OCR)"
             }
         }
     }
