@@ -18,8 +18,112 @@ set(LIBJPEG_DIR "${CMAKE_SOURCE_DIR}/libjpeg-turbo")
 # 手動作成した jconfig.h, jconfigint.h, jversion.h はここにある
 # src/*.h (jpeglib.h等) もここ経由で見つかる
 
-file(GLOB LIBJPEG_CORE_SRCS    "${LIBJPEG_DIR}/src/*.c")
-file(GLOB LIBJPEG_WRAPPER_SRCS "${LIBJPEG_DIR}/src/wrapper/*.c")
+set(LIBJPEG_CORE_SRCS
+    ${LIBJPEG_DIR}/src/jcapimin.c
+    ${LIBJPEG_DIR}/src/jchuff.c
+    ${LIBJPEG_DIR}/src/jcicc.c
+    ${LIBJPEG_DIR}/src/jcinit.c
+    ${LIBJPEG_DIR}/src/jclhuff.c
+    ${LIBJPEG_DIR}/src/jcmarker.c
+    ${LIBJPEG_DIR}/src/jcmaster.c
+    ${LIBJPEG_DIR}/src/jcomapi.c
+    ${LIBJPEG_DIR}/src/jcparam.c
+    ${LIBJPEG_DIR}/src/jcphuff.c
+    ${LIBJPEG_DIR}/src/jctrans.c
+    ${LIBJPEG_DIR}/src/jdapimin.c
+    ${LIBJPEG_DIR}/src/jdatadst.c
+    ${LIBJPEG_DIR}/src/jdatasrc.c
+    ${LIBJPEG_DIR}/src/jdhuff.c
+    ${LIBJPEG_DIR}/src/jdicc.c
+    ${LIBJPEG_DIR}/src/jdinput.c
+    ${LIBJPEG_DIR}/src/jdlhuff.c
+    ${LIBJPEG_DIR}/src/jdmarker.c
+    ${LIBJPEG_DIR}/src/jdmaster.c
+    ${LIBJPEG_DIR}/src/jdphuff.c
+    ${LIBJPEG_DIR}/src/jdtrans.c
+    ${LIBJPEG_DIR}/src/jerror.c
+    ${LIBJPEG_DIR}/src/jfdctflt.c
+    ${LIBJPEG_DIR}/src/jmemmgr.c
+    ${LIBJPEG_DIR}/src/jmemnobs.c
+    ${LIBJPEG_DIR}/src/jpeg_nbits.c
+    ${LIBJPEG_DIR}/src/jaricom.c
+    ${LIBJPEG_DIR}/src/jcarith.c
+    ${LIBJPEG_DIR}/src/jdarith.c
+)
+
+set(LIBJPEG_WRAPPER_SRCS
+    ${LIBJPEG_DIR}/src/wrapper/jcapistd-8.c
+    ${LIBJPEG_DIR}/src/wrapper/jcapistd-12.c
+    ${LIBJPEG_DIR}/src/wrapper/jcapistd-16.c
+    ${LIBJPEG_DIR}/src/wrapper/jccoefct-8.c
+    ${LIBJPEG_DIR}/src/wrapper/jccoefct-12.c
+    ${LIBJPEG_DIR}/src/wrapper/jccolor-8.c
+    ${LIBJPEG_DIR}/src/wrapper/jccolor-12.c
+    ${LIBJPEG_DIR}/src/wrapper/jccolor-16.c
+    ${LIBJPEG_DIR}/src/wrapper/jcdctmgr-8.c
+    ${LIBJPEG_DIR}/src/wrapper/jcdctmgr-12.c
+    ${LIBJPEG_DIR}/src/wrapper/jcdiffct-8.c
+    ${LIBJPEG_DIR}/src/wrapper/jcdiffct-12.c
+    ${LIBJPEG_DIR}/src/wrapper/jcdiffct-16.c
+    ${LIBJPEG_DIR}/src/wrapper/jclossls-8.c
+    ${LIBJPEG_DIR}/src/wrapper/jclossls-12.c
+    ${LIBJPEG_DIR}/src/wrapper/jclossls-16.c
+    ${LIBJPEG_DIR}/src/wrapper/jcmainct-8.c
+    ${LIBJPEG_DIR}/src/wrapper/jcmainct-12.c
+    ${LIBJPEG_DIR}/src/wrapper/jcmainct-16.c
+    ${LIBJPEG_DIR}/src/wrapper/jcprepct-8.c
+    ${LIBJPEG_DIR}/src/wrapper/jcprepct-12.c
+    ${LIBJPEG_DIR}/src/wrapper/jcprepct-16.c
+    ${LIBJPEG_DIR}/src/wrapper/jcsample-8.c
+    ${LIBJPEG_DIR}/src/wrapper/jcsample-12.c
+    ${LIBJPEG_DIR}/src/wrapper/jcsample-16.c
+    ${LIBJPEG_DIR}/src/wrapper/jdapistd-8.c
+    ${LIBJPEG_DIR}/src/wrapper/jdapistd-12.c
+    ${LIBJPEG_DIR}/src/wrapper/jdapistd-16.c
+    ${LIBJPEG_DIR}/src/wrapper/jdcoefct-8.c
+    ${LIBJPEG_DIR}/src/wrapper/jdcoefct-12.c
+    ${LIBJPEG_DIR}/src/wrapper/jdcolor-8.c
+    ${LIBJPEG_DIR}/src/wrapper/jdcolor-12.c
+    ${LIBJPEG_DIR}/src/wrapper/jdcolor-16.c
+    ${LIBJPEG_DIR}/src/wrapper/jddctmgr-8.c
+    ${LIBJPEG_DIR}/src/wrapper/jddctmgr-12.c
+    ${LIBJPEG_DIR}/src/wrapper/jddiffct-8.c
+    ${LIBJPEG_DIR}/src/wrapper/jddiffct-12.c
+    ${LIBJPEG_DIR}/src/wrapper/jddiffct-16.c
+    ${LIBJPEG_DIR}/src/wrapper/jdlossls-8.c
+    ${LIBJPEG_DIR}/src/wrapper/jdlossls-12.c
+    ${LIBJPEG_DIR}/src/wrapper/jdlossls-16.c
+    ${LIBJPEG_DIR}/src/wrapper/jdmainct-8.c
+    ${LIBJPEG_DIR}/src/wrapper/jdmainct-12.c
+    ${LIBJPEG_DIR}/src/wrapper/jdmainct-16.c
+    ${LIBJPEG_DIR}/src/wrapper/jdmerge-8.c
+    ${LIBJPEG_DIR}/src/wrapper/jdmerge-12.c
+    ${LIBJPEG_DIR}/src/wrapper/jdpostct-8.c
+    ${LIBJPEG_DIR}/src/wrapper/jdpostct-12.c
+    ${LIBJPEG_DIR}/src/wrapper/jdpostct-16.c
+    ${LIBJPEG_DIR}/src/wrapper/jdsample-8.c
+    ${LIBJPEG_DIR}/src/wrapper/jdsample-12.c
+    ${LIBJPEG_DIR}/src/wrapper/jdsample-16.c
+    ${LIBJPEG_DIR}/src/wrapper/jfdctfst-8.c
+    ${LIBJPEG_DIR}/src/wrapper/jfdctfst-12.c
+    ${LIBJPEG_DIR}/src/wrapper/jfdctint-8.c
+    ${LIBJPEG_DIR}/src/wrapper/jfdctint-12.c
+    ${LIBJPEG_DIR}/src/wrapper/jidctflt-8.c
+    ${LIBJPEG_DIR}/src/wrapper/jidctflt-12.c
+    ${LIBJPEG_DIR}/src/wrapper/jidctfst-8.c
+    ${LIBJPEG_DIR}/src/wrapper/jidctfst-12.c
+    ${LIBJPEG_DIR}/src/wrapper/jidctint-8.c
+    ${LIBJPEG_DIR}/src/wrapper/jidctint-12.c
+    ${LIBJPEG_DIR}/src/wrapper/jidctred-8.c
+    ${LIBJPEG_DIR}/src/wrapper/jidctred-12.c
+    ${LIBJPEG_DIR}/src/wrapper/jquant1-8.c
+    ${LIBJPEG_DIR}/src/wrapper/jquant1-12.c
+    ${LIBJPEG_DIR}/src/wrapper/jquant2-8.c
+    ${LIBJPEG_DIR}/src/wrapper/jquant2-12.c
+    ${LIBJPEG_DIR}/src/wrapper/jutils-8.c
+    ${LIBJPEG_DIR}/src/wrapper/jutils-12.c
+    ${LIBJPEG_DIR}/src/wrapper/jutils-16.c
+)
 
 add_library(jpeg_static STATIC
     ${LIBJPEG_CORE_SRCS}
