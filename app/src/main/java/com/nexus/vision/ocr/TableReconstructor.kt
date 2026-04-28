@@ -8,26 +8,12 @@ import kotlin.math.abs
 /**
  * OCR 結果からテーブル構造を復元する
  *
- * ML Kit の TextBlock / TextLine から座標を取得し、
- * Y 座標のクラスタリングで行、X 座標のクラスタリングで列を推定して
- * 二次元テーブルに変換する。
- *
- * 出力: CSV テキスト or Markdown テーブル
- *
  * Phase 9: OCR + 表復元
  */
 object TableReconstructor {
 
     private const val TAG = "TableRecon"
 
-    /**
-     * OCR 結果から表構造を復元する
-     *
-     * @param ocrResult  ML Kit OCR 結果
-     * @param yTolerance Y 座標の行グループ化しきい値 (px)
-     * @param xTolerance X 座標の列グループ化しきい値 (px)
-     * @return テーブル復元結果
-     */
     fun reconstruct(
         ocrResult: OcrResult,
         yTolerance: Int = 0,
@@ -35,7 +21,6 @@ object TableReconstructor {
     ): TableResult {
         val startTime = System.currentTimeMillis()
 
-        // 1. 全エレメントを座標付きで収集
         val cells = mutableListOf<CellInfo>()
         for (block in ocrResult.blocks) {
             for (line in block.lines) {
@@ -50,28 +35,18 @@ object TableReconstructor {
             return TableResult.empty()
         }
 
-        // 2. Y 座標しきい値の自動計算
-        val autoYTolerance = if (yTolerance > 0) yTolerance else {
-            estimateYTolerance(cells)
-        }
-        val autoXTolerance = if (xTolerance > 0) xTolerance else {
-            estimateXTolerance(cells)
-        }
+        val autoYTolerance = if (yTolerance > 0) yTolerance else estimateYTolerance(cells)
+        val autoXTolerance = if (xTolerance > 0) xTolerance else estimateXTolerance(cells)
 
         Log.d(TAG, "Cells: ${cells.size}, yTol=$autoYTolerance, xTol=$autoXTolerance")
 
-        // 3. Y 座標でクラスタリング → 行グループ
         val rowGroups = clusterByY(cells, autoYTolerance)
 
-        // 4. 各行内を X 座標でソート
         for (group in rowGroups) {
             group.sortBy { it.box.left }
         }
 
-        // 5. X 座標でクラスタリング → 列位置を推定
         val columnPositions = estimateColumnPositions(rowGroups, autoXTolerance)
-
-        // 6. 二次元テーブルに配置
         val table = buildTable(rowGroups, columnPositions, autoXTolerance)
 
         val elapsed = System.currentTimeMillis() - startTime
@@ -85,29 +60,18 @@ object TableReconstructor {
         )
     }
 
-    /**
-     * Y 座標のしきい値を自動推定する
-     * セル高さの中央値の半分を使用
-     */
     private fun estimateYTolerance(cells: List<CellInfo>): Int {
         val heights = cells.map { it.box.height() }.sorted()
         val median = if (heights.isNotEmpty()) heights[heights.size / 2] else 20
         return maxOf(median / 2, 5)
     }
 
-    /**
-     * X 座標のしきい値を自動推定する
-     * セル幅の中央値の半分を使用
-     */
     private fun estimateXTolerance(cells: List<CellInfo>): Int {
         val widths = cells.map { it.box.width() }.sorted()
         val median = if (widths.isNotEmpty()) widths[widths.size / 2] else 40
         return maxOf(median / 2, 10)
     }
 
-    /**
-     * Y 座標（中心）でクラスタリングして行グループを作る
-     */
     private fun clusterByY(cells: List<CellInfo>, tolerance: Int): List<MutableList<CellInfo>> {
         val sorted = cells.sortedBy { it.box.centerY() }
         val groups = mutableListOf<MutableList<CellInfo>>()
@@ -129,19 +93,14 @@ object TableReconstructor {
         return groups
     }
 
-    /**
-     * 全行のセルの X 座標（左端）から列位置を推定する
-     */
     private fun estimateColumnPositions(
         rowGroups: List<List<CellInfo>>,
         tolerance: Int
     ): List<Int> {
-        // 全セルの左端座標を収集
         val allLeftX = rowGroups.flatMap { group ->
             group.map { it.box.left }
         }.sorted()
 
-        // X 座標をクラスタリング
         val positions = mutableListOf<Int>()
         for (x in allLeftX) {
             val nearest = positions.find { abs(it - x) <= tolerance }
@@ -153,9 +112,6 @@ object TableReconstructor {
         return positions.sorted()
     }
 
-    /**
-     * 二次元テーブルに配置する
-     */
     private fun buildTable(
         rowGroups: List<List<CellInfo>>,
         columnPositions: List<Int>,
@@ -165,7 +121,6 @@ object TableReconstructor {
             val row = MutableList(columnPositions.size) { "" }
 
             for (cell in group) {
-                // 最も近い列位置を探す
                 var bestCol = 0
                 var bestDist = Int.MAX_VALUE
                 for ((colIdx, colX) in columnPositions.withIndex()) {
@@ -176,7 +131,6 @@ object TableReconstructor {
                     }
                 }
 
-                // 同じセルに既にテキストがあれば結合
                 if (row[bestCol].isNotEmpty()) {
                     row[bestCol] = row[bestCol] + " " + cell.text
                 } else {
@@ -187,8 +141,6 @@ object TableReconstructor {
             row.toList()
         }
     }
-
-    // ── データクラス ──
 
     data class CellInfo(
         val text: String,
@@ -205,9 +157,6 @@ object TableReconstructor {
         val isSuccess: Boolean get() = rows.isNotEmpty() && errorMessage == null
         val isTable: Boolean get() = rowCount >= 2 && colCount >= 2
 
-        /**
-         * CSV テキストに変換
-         */
         fun toCsv(): String {
             return rows.joinToString("\n") { row ->
                 row.joinToString(",") { cell ->
@@ -221,24 +170,80 @@ object TableReconstructor {
         }
 
         /**
-         * Markdown テーブルに変換
+         * プレーンテキストのテーブル（等幅フォント前提で桁揃え）
          */
+        fun toTextTable(): String {
+            if (rows.isEmpty()) return ""
+
+            val maxCols = colCount
+
+            // 各列の最大幅を計算（全角文字は幅2）
+            val colWidths = IntArray(maxCols)
+            for (row in rows) {
+                for ((i, cell) in row.withIndex()) {
+                    if (i < maxCols) {
+                        colWidths[i] = maxOf(colWidths[i], displayWidth(cell))
+                    }
+                }
+            }
+            for (i in colWidths.indices) {
+                colWidths[i] = maxOf(colWidths[i], 3)
+            }
+
+            val sb = StringBuilder()
+
+            fun appendSeparator() {
+                sb.append("+")
+                for (w in colWidths) {
+                    sb.append("-".repeat(w + 2))
+                    sb.append("+")
+                }
+                sb.appendLine()
+            }
+
+            // ヘッダー
+            appendSeparator()
+            sb.append("|")
+            val header = rows.first()
+            for (i in 0 until maxCols) {
+                val cell = header.getOrElse(i) { "" }
+                sb.append(" ")
+                sb.append(padCell(cell, colWidths[i]))
+                sb.append(" |")
+            }
+            sb.appendLine()
+            appendSeparator()
+
+            // データ行
+            for (rowIdx in 1 until rows.size) {
+                val row = rows[rowIdx]
+                sb.append("|")
+                for (i in 0 until maxCols) {
+                    val cell = row.getOrElse(i) { "" }
+                    sb.append(" ")
+                    sb.append(padCell(cell, colWidths[i]))
+                    sb.append(" |")
+                }
+                sb.appendLine()
+            }
+            appendSeparator()
+
+            return sb.toString()
+        }
+
         fun toMarkdown(): String {
             if (rows.isEmpty()) return ""
 
             val sb = StringBuilder()
 
-            // ヘッダー行
             sb.append("| ")
             rows.first().forEach { cell -> sb.append("$cell | ") }
             sb.appendLine()
 
-            // 区切り行
             sb.append("| ")
             repeat(colCount) { sb.append("--- | ") }
             sb.appendLine()
 
-            // データ行
             for (i in 1 until rows.size) {
                 sb.append("| ")
                 rows[i].forEach { cell -> sb.append("$cell | ") }
@@ -246,6 +251,20 @@ object TableReconstructor {
             }
 
             return sb.toString()
+        }
+
+        private fun displayWidth(text: String): Int {
+            var width = 0
+            for (ch in text) {
+                width += if (ch.code > 0x7F) 2 else 1
+            }
+            return width
+        }
+
+        private fun padCell(text: String, targetWidth: Int): String {
+            val currentWidth = displayWidth(text)
+            val padding = targetWidth - currentWidth
+            return if (padding > 0) text + " ".repeat(padding) else text
         }
 
         companion object {

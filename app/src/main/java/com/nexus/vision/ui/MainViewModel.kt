@@ -686,8 +686,8 @@ class MainViewModel : ViewModel() {
             buildString {
                 appendLine("【表復元結果】${tableResult.rowCount} 行 × ${tableResult.colCount} 列 (${tableResult.processingTimeMs}ms)")
                 appendLine()
-                appendLine("▼ Markdown テーブル:")
-                appendLine(tableResult.toMarkdown())
+                appendLine("▼ テキストテーブル:")
+                appendLine(tableResult.toTextTable())
                 appendLine()
                 appendLine("▼ CSV:")
                 appendLine(tableResult.toCsv())
@@ -725,7 +725,7 @@ class MainViewModel : ViewModel() {
                         buildString {
                             appendLine("【${result.format} 解析結果】${result.rowCount} 行 × ${result.colCount} 列 (${result.processingTimeMs}ms)")
                             appendLine()
-                            appendLine(result.toMarkdown())
+                            appendLine(result.toTextTable())
                         }
                     } else {
                         result.errorMessage ?: "ファイル解析失敗"

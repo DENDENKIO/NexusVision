@@ -312,7 +312,7 @@ class ShareReceiver : ComponentActivity() {
                 val result = ExcelCsvParser.parseFromUri(applicationContext, uri, resolvedMime)
                 if (result.isSuccess) {
                     "【CSV 解析結果】\n${result.rowCount} 行 × ${result.colCount} 列 (${result.processingTimeMs}ms)\n\n" +
-                            result.toMarkdown()
+                            result.toTextTable()
                 } else {
                     result.errorMessage ?: "CSV 解析失敗"
                 }
@@ -325,7 +325,7 @@ class ShareReceiver : ComponentActivity() {
                 val result = ExcelCsvParser.parseFromUri(applicationContext, uri, resolvedMime)
                 if (result.isSuccess) {
                     "【Excel 解析結果】\n${result.rowCount} 行 × ${result.colCount} 列 (${result.processingTimeMs}ms)\n\n" +
-                            result.toMarkdown()
+                            result.toTextTable()
                 } else {
                     result.errorMessage ?: "Excel 解析失敗"
                 }
