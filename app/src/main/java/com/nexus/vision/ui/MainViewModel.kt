@@ -31,6 +31,8 @@ import com.nexus.vision.ncnn.RealEsrganBridge
 import com.nexus.vision.parser.ExcelCsvParser
 import com.nexus.vision.parser.PdfExtractor
 import com.nexus.vision.parser.SourceCodeParser
+import com.nexus.vision.sheets.NexusSheetsIndex
+import com.nexus.vision.sheets.SheetsQueryEngine
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
@@ -51,10 +53,9 @@ import androidx.work.WorkManager
 import com.nexus.vision.worker.BatchEnhanceQueue
 import com.nexus.vision.worker.BatchEnhanceWorker
 
-/** 範囲選択の目的 */
 enum class CropPurpose {
-    ENHANCE,  // 高画質化
-    ZOOM      // ズーム（拡大）
+    ENHANCE,
+    ZOOM
 }
 
 data class MainUiState(
@@ -68,7 +69,6 @@ data class MainUiState(
     val inputText: String = "",
     val selectedImageUri: Uri? = null,
     val selectedImagePath: String? = null,
-    // 範囲選択モード
     val cropMode: Boolean = false,
     val cropPurpose: CropPurpose = CropPurpose.ENHANCE,
     val cropImageUri: Uri? = null,
@@ -84,6 +84,15 @@ class MainViewModel : ViewModel() {
 
     companion object {
         private const val TAG = "MainViewModel"
+
+        /** NexusSheets が反応するキーワード */
+        private val SHEETS_KEYWORDS = listOf(
+            "検索", "探して", "探す", "ファイル一覧", "登録",
+            "合計", "平均", "最大", "最小", "最高", "最低", "件数",
+            "比較", "削除", "シート",
+            "の売上", "の利益", "の金額", "の数", "の値",
+            "について", "はいくつ", "はいくら"
+        )
     }
 
     private val app = NexusApplication.getInstance()
@@ -95,6 +104,10 @@ class MainViewModel : ViewModel() {
 
     private var routeC: RouteCProcessor? = null
     private var routeCInitialized = false
+
+    // Phase 8.5: NexusSheets
+    private val sheetsIndex: NexusSheetsIndex = app.sheetsIndex
+    private val sheetsQueryEngine: SheetsQueryEngine = app.sheetsQueryEngine
 
     private var batchProgressMessageId: String? = null
 
@@ -135,7 +148,13 @@ class MainViewModel : ViewModel() {
             }
         }
 
-        addSystemMessage("NEXUS Vision へようこそ。画像・PDF・CSV・テキストを送信できます。エンジンをロードするとAI解析も利用可能です。")
+        // ウェルカムメッセージ（登録ファイル数を表示）
+        val fileCount = sheetsIndex.fileCount()
+        val welcomeExtra = if (fileCount > 0) "登録済みファイル: ${fileCount}件。" else ""
+        addSystemMessage(
+            "NEXUS Vision へようこそ。画像・PDF・CSV・テキストを送信できます。" +
+                    "ファイルを共有すると登録され、チャットから横断検索できます。$welcomeExtra"
+        )
         initSuperResolution()
 
         // バッチ進捗監視
@@ -151,16 +170,16 @@ class MainViewModel : ViewModel() {
 
                 val text = buildString {
                     if (progress.isPaused) {
-                        append("⏸ 一時停止中 (${progress.pauseReason})")
+                        append("一時停止中 (${progress.pauseReason})")
                     } else if (progress.isRunning) {
-                        append("🔄 ${progress.completed + 1}/${progress.total} 処理中...")
+                        append("${progress.completed + 1}/${progress.total} 処理中...")
                         if (progress.estimatedRemainingMs > 0) {
                             val min = progress.estimatedRemainingMs / 60_000
                             val sec = (progress.estimatedRemainingMs % 60_000) / 1_000
                             append(" 残り約 ${min}分${sec}秒")
                         }
                     } else {
-                        append("✅ バッチ完了: ${progress.successCount}/${progress.total} 成功")
+                        append("バッチ完了: ${progress.successCount}/${progress.total} 成功")
                         if (progress.failed > 0) append("、${progress.failed} 失敗")
                     }
                 }
@@ -370,37 +389,46 @@ class MainViewModel : ViewModel() {
                 text.contains("zoom", ignoreCase = true)
         )
 
-        // ファイル解析判定（画像以外のUri）
         val isFileRequest = imageUri != null && !isOcrRequest && !isTableRequest &&
                 !isEnhanceRequest && !isZoomRequest && isFileUri(imageUri)
 
+        // NexusSheets クエリ判定
+        val isSheetsQuery = imageUri == null && (
+                sheetsIndex.fileCount() > 0 &&
+                        SHEETS_KEYWORDS.any { text.contains(it, ignoreCase = true) }
+                ) || (imageUri == null && (
+                text.contains("ファイル一覧") ||
+                        text.contains("登録ファイル") ||
+                        text.contains("全削除")
+                ))
+
         val needsEngine = !isOcrRequest && !isTableRequest && !isEnhanceRequest &&
-                !isZoomRequest && !isFileRequest
+                !isZoomRequest && !isFileRequest && !isSheetsQuery
 
         if (needsEngine && !_uiState.value.isEngineReady) {
             addMessage(
                 ChatMessage(
                     role = ChatMessage.Role.ASSISTANT,
-                    text = "エンジンがロードされていません。「エンジンをロード」ボタンを押してからテキスト送信してください。\n\n" +
-                            "エンジンなしで利用可能: 画像OCR、表復元、高画質化、PDF解析、CSV/Excel解析"
+                    text = "エンジンがロードされていません。\n\n" +
+                            "エンジンなしで利用可能: 画像OCR、表復元、高画質化、ファイル登録・検索・集計\n" +
+                            "AI 連携回答にはエンジンのロードが必要です。"
                 )
             )
             return
         }
 
-        // ズーム要求 → 範囲選択モード
         if (isZoomRequest) {
             enterCropMode(imageUri!!, CropPurpose.ZOOM)
             return
         }
 
-        // 高画質化要求 → 範囲選択モード
         if (isEnhanceRequest) {
             enterCropMode(imageUri!!, CropPurpose.ENHANCE)
             return
         }
 
         val processingLabel = when {
+            isSheetsQuery -> "データを検索中..."
             isTableRequest -> "表構造を復元中..."
             isOcrRequest -> "テキスト読み取り中..."
             isFileRequest -> "ファイルを解析中..."
@@ -413,6 +441,7 @@ class MainViewModel : ViewModel() {
         viewModelScope.launch {
             try {
                 val response = when {
+                    isSheetsQuery -> sheetsQueryEngine.query(displayText)
                     isTableRequest -> processTableRequest(imageUri!!)
                     isOcrRequest -> processOcrRequest(imageUri!!)
                     isFileRequest -> processFileRequest(imageUri!!)
@@ -434,9 +463,6 @@ class MainViewModel : ViewModel() {
         }
     }
 
-    /**
-     * Uri がファイル（PDF/CSV/XLSX/ソースコード等）かどうかを判定する
-     */
     private fun isFileUri(uri: Uri): Boolean {
         val mimeType = app.contentResolver.getType(uri) ?: ""
         val path = uri.toString().lowercase()
@@ -453,7 +479,6 @@ class MainViewModel : ViewModel() {
                 path.endsWith(".go") || path.endsWith(".rs") || path.endsWith(".dart")
     }
 
-    /** ズーム/高画質化要求時に範囲選択モードに入る */
     private fun enterCropMode(uri: Uri, purpose: CropPurpose) {
         viewModelScope.launch(Dispatchers.IO) {
             val context = app.applicationContext
@@ -464,7 +489,7 @@ class MainViewModel : ViewModel() {
                 addMessage(
                     ChatMessage(
                         role = ChatMessage.Role.ASSISTANT,
-                        text = "⚠️ 画像を読み込めませんでした"
+                        text = "画像を読み込めませんでした"
                     )
                 )
                 return@launch
@@ -505,12 +530,12 @@ class MainViewModel : ViewModel() {
 
         val regionBitmap = RegionDecoder.decodeRegion(
             context, uri, left, top, right, bottom, maxOutputSide = 4096
-        ) ?: return@withContext "⚠️ 選択領域のデコードに失敗しました"
+        ) ?: return@withContext "選択領域のデコードに失敗しました"
 
         val safeCopy = if (regionBitmap.config != Bitmap.Config.ARGB_8888) {
             val copy = regionBitmap.copy(Bitmap.Config.ARGB_8888, false)
             regionBitmap.recycle()
-            copy ?: return@withContext "⚠️ コピーに失敗しました"
+            copy ?: return@withContext "コピーに失敗しました"
         } else {
             regionBitmap
         }
@@ -523,19 +548,19 @@ class MainViewModel : ViewModel() {
                 CropPurpose.ZOOM -> "Zoom"
             }
             val resultLabel = when (purpose) {
-                CropPurpose.ENHANCE -> "✅ 高画質化完了"
-                CropPurpose.ZOOM -> "✅ デジタルズーム完了"
+                CropPurpose.ENHANCE -> "高画質化完了"
+                CropPurpose.ZOOM -> "デジタルズーム完了"
             }
 
             val savedUri = saveBitmapToGallery(result.bitmap, savePrefix)
             val responseText = buildString {
-                appendLine("${resultLabel} (${result.method})")
-                appendLine("📐 元画像: ${imgW}×${imgH}")
-                appendLine("📐 選択範囲: ${safeCopy.width}×${safeCopy.height}")
-                appendLine("📐 出力: ${result.bitmap.width}×${result.bitmap.height}")
-                appendLine("⏱ ${result.timeMs}ms")
+                appendLine("$resultLabel (${result.method})")
+                appendLine("元画像: ${imgW}×${imgH}")
+                appendLine("選択範囲: ${safeCopy.width}×${safeCopy.height}")
+                appendLine("出力: ${result.bitmap.width}×${result.bitmap.height}")
+                appendLine("処理時間: ${result.timeMs}ms")
                 if (savedUri != null) {
-                    appendLine("📁 Pictures/NexusVision/ に保存")
+                    appendLine("Pictures/NexusVision/ に保存しました")
                 }
             }
             safeCopy.recycle()
@@ -543,7 +568,7 @@ class MainViewModel : ViewModel() {
             responseText
         } else {
             safeCopy.recycle()
-            "⚠️ 選択範囲の超解像に失敗しました"
+            "選択範囲の超解像に失敗しました"
         }
     }
 
@@ -559,7 +584,7 @@ class MainViewModel : ViewModel() {
         }
     }
 
-    // ── 画像処理（DEOR 連携） ──
+    // ── 画像処理 ──
 
     private suspend fun processImageMessage(uri: Uri, text: String): String =
         withContext(Dispatchers.IO) {
@@ -648,13 +673,12 @@ class MainViewModel : ViewModel() {
             }
         }
 
-    // ── 表復元処理 (Phase 9) ──
+    // ── 表復元処理 ──
 
     private suspend fun processTableRequest(uri: Uri): String =
         withContext(Dispatchers.IO) {
             val context = app.applicationContext
 
-            // 1. 画像を読み込み
             val inputStream = context.contentResolver.openInputStream(uri)
                 ?: throw IllegalStateException("画像を開けません")
             val bitmap = BitmapFactory.decodeStream(inputStream)
@@ -662,7 +686,6 @@ class MainViewModel : ViewModel() {
 
             if (bitmap == null) throw IllegalStateException("画像のデコードに失敗しました")
 
-            // 2. OCR 実行（座標情報付き）
             val ocrResult = ocrEngine.recognize(bitmap)
             bitmap.recycle()
 
@@ -670,11 +693,9 @@ class MainViewModel : ViewModel() {
                 return@withContext "テキストを検出できませんでした。表が含まれる画像を選択してください。"
             }
 
-            // 3. テーブル構造を復元
             val tableResult = TableReconstructor.reconstruct(ocrResult)
 
             if (!tableResult.isTable) {
-                // テーブルとして認識できなかった場合、通常のテキストとして返す
                 return@withContext buildString {
                     appendLine("【テキスト読み取り結果】(表構造は検出されませんでした)")
                     appendLine()
@@ -682,25 +703,21 @@ class MainViewModel : ViewModel() {
                 }
             }
 
-            // 4. 結果をフォーマット
             buildString {
                 appendLine("【表復元結果】${tableResult.rowCount} 行 × ${tableResult.colCount} 列 (${tableResult.processingTimeMs}ms)")
                 appendLine()
-                appendLine("▼ テキストテーブル:")
-                appendLine(tableResult.toTextTable())
-                appendLine()
-                appendLine("▼ CSV:")
+                appendLine("CSV:")
                 appendLine(tableResult.toCsv())
             }
         }
 
-    // ── ファイル解析処理 (Phase 8) ──
+    // ── ファイル解析処理 ──
 
     private suspend fun processFileRequest(uri: Uri): String =
         withContext(Dispatchers.IO) {
             val context = app.applicationContext
             val mimeType = context.contentResolver.getType(uri) ?: ""
-            val filename = uri.lastPathSegment ?: ""
+            val filename = uri.lastPathSegment ?: "unknown"
 
             Log.i(TAG, "File request: mime=$mimeType, filename=$filename")
 
@@ -709,7 +726,16 @@ class MainViewModel : ViewModel() {
                 mimeType.contains("pdf") || filename.endsWith(".pdf", ignoreCase = true) -> {
                     val result = PdfExtractor.extractFromUri(context, uri)
                     if (result.isSuccess) {
-                        result.toSummaryText()
+                        // インデックス登録
+                        val pageTexts = result.pages.map { it.text }
+                        sheetsIndex.addPdfText(pageTexts, filename)
+                        buildString {
+                            appendLine("「$filename」を登録しました。")
+                            appendLine("${result.processedPages}/${result.totalPages} ページ (${result.processingTimeMs}ms)")
+                            appendLine()
+                            appendLine("チャットから検索・質問できます。")
+                            appendLine("例: 「○○を検索」「○○について教えて」")
+                        }
                     } else {
                         result.errorMessage ?: "PDF 解析失敗"
                     }
@@ -722,10 +748,15 @@ class MainViewModel : ViewModel() {
                         filename.endsWith(".xlsx", ignoreCase = true) -> {
                     val result = ExcelCsvParser.parseFromUri(context, uri, mimeType)
                     if (result.isSuccess) {
+                        // インデックス登録
+                        val fileType = if (filename.endsWith(".xlsx", ignoreCase = true)) "xlsx" else "csv"
+                        sheetsIndex.addParsedTable(result.rows, filename, fileType)
                         buildString {
-                            appendLine("【${result.format} 解析結果】${result.rowCount} 行 × ${result.colCount} 列 (${result.processingTimeMs}ms)")
+                            appendLine("「$filename」を登録しました。")
+                            appendLine("${result.rowCount} 行 × ${result.colCount} 列 (${result.processingTimeMs}ms)")
                             appendLine()
-                            appendLine(result.toTextTable())
+                            appendLine("チャットから検索・質問できます。")
+                            appendLine("例: 「東京の売上」「売上の合計」「○○を検索」")
                         }
                     } else {
                         result.errorMessage ?: "ファイル解析失敗"
@@ -751,7 +782,7 @@ class MainViewModel : ViewModel() {
             val context = app.applicationContext
 
             val imgSize = RegionDecoder.getImageSize(context, uri)
-                ?: return@withContext "⚠️ 画像サイズを取得できません"
+                ?: return@withContext "画像サイズを取得できません"
             val (origW, origH) = imgSize
 
             val maxOutputPixels = 4096L * 4096
@@ -766,12 +797,12 @@ class MainViewModel : ViewModel() {
             Log.i(TAG, "Enhance: original=${origW}x${origH}, maxDecode=$maxDecodeSide")
 
             val decoded = RegionDecoder.decodeSafe(context, uri, maxDecodeSide)
-                ?: return@withContext "⚠️ 画像のデコードに失敗しました"
+                ?: return@withContext "画像のデコードに失敗しました"
 
             val safeCopy = if (decoded.config != Bitmap.Config.ARGB_8888) {
                 val copy = decoded.copy(Bitmap.Config.ARGB_8888, false)
                 decoded.recycle()
-                copy ?: return@withContext "⚠️ コピーに失敗しました"
+                copy ?: return@withContext "コピーに失敗しました"
             } else {
                 decoded
             }
@@ -783,18 +814,18 @@ class MainViewModel : ViewModel() {
             if (result != null && result.success) {
                 val savedUri = saveBitmapToGallery(result.bitmap, "Enhanced")
                 val responseText = buildString {
-                    appendLine("✅ 高画質化完了 (${result.method})")
-                    appendLine("📐 元画像: ${origW}×${origH}")
-                    appendLine("📐 処理入力: ${safeCopy.width}×${safeCopy.height}")
-                    appendLine("📐 出力: ${result.bitmap.width}×${result.bitmap.height}")
-                    appendLine("⏱ ${result.timeMs}ms")
+                    appendLine("高画質化完了 (${result.method})")
+                    appendLine("元画像: ${origW}×${origH}")
+                    appendLine("処理入力: ${safeCopy.width}×${safeCopy.height}")
+                    appendLine("出力: ${result.bitmap.width}×${result.bitmap.height}")
+                    appendLine("処理時間: ${result.timeMs}ms")
                     if (savedUri != null) {
-                        appendLine("📁 Pictures/NexusVision/ に保存")
+                        appendLine("Pictures/NexusVision/ に保存しました")
                     }
                     if (origPixels > maxOutputPixels) {
                         appendLine()
-                        appendLine("💡 この画像は非常に大きいため、4096pxに制限して処理しました")
-                        appendLine("💡 部分拡大は「ズーム」で範囲選択すると元解像度で鮮明に処理できます")
+                        appendLine("この画像は非常に大きいため、4096pxに制限して処理しました")
+                        appendLine("部分拡大は「ズーム」で範囲選択すると元解像度で鮮明に処理できます")
                     }
                 }
                 safeCopy.recycle()
@@ -804,9 +835,9 @@ class MainViewModel : ViewModel() {
                 val savedUri = saveBitmapToGallery(safeCopy, "Original")
                 safeCopy.recycle()
                 buildString {
-                    appendLine("⚠️ 高画質化に失敗しました")
+                    appendLine("高画質化に失敗しました")
                     appendLine("元画像をそのまま保存しました")
-                    if (savedUri != null) appendLine("📁 Pictures/NexusVision/ に保存済")
+                    if (savedUri != null) appendLine("Pictures/NexusVision/ に保存済")
                 }
             }
         }
@@ -845,7 +876,7 @@ class MainViewModel : ViewModel() {
             contentValues.clear()
             contentValues.put(MediaStore.Images.Media.IS_PENDING, 0)
             resolver.update(uri, contentValues, null, null)
-            Log.i(TAG, "Streaming saved to gallery: $filename (uri=$uri)")
+            Log.i(TAG, "Streaming saved: $filename (uri=$uri)")
             return uri
         } catch (e: Exception) {
             Log.e(TAG, "Streaming save failed: ${e.message}")
@@ -916,7 +947,7 @@ class MainViewModel : ViewModel() {
             )
         )
 
-        val processingId = addProcessingMessage("🔄 バッチ高画質化を開始します (${uris.size} 枚)...")
+        val processingId = addProcessingMessage("バッチ高画質化を開始します (${uris.size} 枚)...")
         batchProgressMessageId = processingId
 
         val displayNames = uris.map { uri ->

@@ -108,99 +108,10 @@
         }
       ],
       "relations": []
-    },
-    {
-      "id": "3:269871739635304770",
-      "lastPropertyId": "8:3713708653217432714",
-      "name": "IndexedFile",
-      "properties": [
-        {
-          "id": "1:3518592092124922363",
-          "name": "id",
-          "type": 6,
-          "flags": 1
-        },
-        {
-          "id": "2:8513533913865321395",
-          "name": "fileName",
-          "indexId": "5:8880131972474191986",
-          "type": 9,
-          "flags": 2048
-        },
-        {
-          "id": "3:6282983075029390353",
-          "name": "fileType",
-          "type": 9
-        },
-        {
-          "id": "4:9204244492712475801",
-          "name": "importedAt",
-          "type": 6
-        },
-        {
-          "id": "5:1827675750966597954",
-          "name": "rowCount",
-          "type": 5
-        },
-        {
-          "id": "6:4546056385294340615",
-          "name": "colCount",
-          "type": 5
-        },
-        {
-          "id": "7:6680436329057106376",
-          "name": "headerJson",
-          "type": 9
-        },
-        {
-          "id": "8:3713708653217432714",
-          "name": "summary",
-          "type": 9
-        }
-      ],
-      "relations": []
-    },
-    {
-      "id": "4:8437837709962059379",
-      "lastPropertyId": "5:5919385774952372095",
-      "name": "IndexedRow",
-      "properties": [
-        {
-          "id": "1:1067634086571329376",
-          "name": "id",
-          "type": 6,
-          "flags": 1
-        },
-        {
-          "id": "2:7047728139459650148",
-          "name": "fileId",
-          "indexId": "6:1536693858289738549",
-          "type": 6,
-          "flags": 8
-        },
-        {
-          "id": "3:5551364729916261859",
-          "name": "rowIndex",
-          "type": 5
-        },
-        {
-          "id": "4:874348832194377146",
-          "name": "cellsJson",
-          "type": 9
-        },
-        {
-          "id": "5:5919385774952372095",
-          "name": "searchText",
-          "indexId": "7:3285815314558745583",
-          "type": 9,
-          "flags": 2048
-        }
-      ],
-      "relations": []
     }
   ],
-  "lastEntityId": "4:8437837709962059379",
-  "lastIndexId": "7:3285815314558745583",
+  "lastEntityId": "2:1141832672566538766",
+  "lastIndexId": "4:7684813132983160039",
   "lastRelationId": "0:0",
   "lastSequenceId": "0:0",
   "modelVersion": 5,

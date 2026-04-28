@@ -26,6 +26,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
+import com.nexus.vision.NexusApplication
 import com.nexus.vision.engine.EngineState
 import com.nexus.vision.engine.NexusEngineManager
 import com.nexus.vision.ocr.MlKitOcrEngine
@@ -37,18 +38,19 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 
 /**
- * ACTION_SEND / ACTION_SEND_MULTIPLE で共有された
- * 画像・テキスト・ファイルを受信する Activity。
+ * ACTION_SEND / ACTION_SEND_MULTIPLE で共有されたデータを受信する Activity。
+ *
+ * CSV / Excel / PDF はインデックスに登録し、チャットから検索可能にする。
+ * 画像は OCR 処理。テキストは AI 要約。
  *
  * Phase 10: OS 統合
- * Phase 8: ファイル解析統合
+ * Phase 8.5: NexusSheets インデックス統合
  */
 class ShareReceiver : ComponentActivity() {
 
     companion object {
         private const val TAG = "ShareReceiver"
 
-        /** ファイルとして解析すべき拡張子一覧 */
         private val FILE_EXTENSIONS = setOf(
             ".csv", ".xlsx", ".xls", ".pdf",
             ".kt", ".kts", ".java", ".py", ".js", ".ts", ".jsx", ".tsx",
@@ -60,12 +62,14 @@ class ShareReceiver : ComponentActivity() {
             ".gradle", ".toml", ".properties", ".cfg", ".ini", ".conf"
         )
 
-        /** ファイルとして解析すべき MIME タイプの部分文字列 */
         private val FILE_MIME_PARTS = setOf(
             "pdf", "csv", "comma-separated",
             "spreadsheetml", "xlsx", "excel",
             "octet-stream"
         )
+
+        /** インデックス登録対象の拡張子 */
+        private val INDEXABLE_EXTENSIONS = setOf(".csv", ".xlsx", ".pdf")
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -123,16 +127,6 @@ class ShareReceiver : ComponentActivity() {
         }
     }
 
-    /**
-     * Intent からデータを解析する。
-     *
-     * 判定の優先順位:
-     *   1. EXTRA_STREAM に URI があり、拡張子または MIME がファイル系 → FileData
-     *   2. image (MIME) → SingleImage / MultipleImages
-     *   3. EXTRA_TEXT に文字列がある → TextData
-     *   4. EXTRA_STREAM に URI があるがファイル判定できない → FileData (fallback)
-     *   5. 何もない → Empty
-     */
     private fun parseIntent(intent: Intent): ReceivedData {
         val action = intent.action
         val type = intent.type ?: ""
@@ -147,34 +141,27 @@ class ShareReceiver : ComponentActivity() {
         if (action == Intent.ACTION_SEND) {
             val streamUri = intent.getParcelableExtra<Uri>(Intent.EXTRA_STREAM)
 
-            // EXTRA_STREAM がある場合 → ファイルか画像かを判定
             if (streamUri != null) {
-                // 実際の MIME タイプをContentResolverからも取得
                 val resolvedMime = contentResolver.getType(streamUri) ?: type
                 val filename = getFilename(streamUri)
 
                 Log.i(TAG, "Stream URI: $streamUri, resolvedMime=$resolvedMime, filename=$filename")
 
-                // 画像判定（かつファイル拡張子がソースコード等でない場合）
                 if (resolvedMime.startsWith("image/") && !hasFileExtension(filename)) {
                     return ReceivedData.SingleImage(streamUri)
                 }
 
-                // ファイル判定（拡張子 or MIME タイプ）
                 if (hasFileExtension(filename) || hasFileMimeType(resolvedMime)) {
                     return ReceivedData.FileData(streamUri, resolvedMime)
                 }
 
-                // 画像系 MIME なら画像として扱う
                 if (resolvedMime.startsWith("image/")) {
                     return ReceivedData.SingleImage(streamUri)
                 }
 
-                // それ以外の EXTRA_STREAM は汎用ファイルとして扱う
                 return ReceivedData.FileData(streamUri, resolvedMime)
             }
 
-            // EXTRA_STREAM がなく EXTRA_TEXT がある場合 → テキスト
             val extraText = intent.getStringExtra(Intent.EXTRA_TEXT)
             if (!extraText.isNullOrBlank()) {
                 return ReceivedData.TextData(extraText)
@@ -184,11 +171,7 @@ class ShareReceiver : ComponentActivity() {
         return ReceivedData.Empty
     }
 
-    /**
-     * URI からファイル名を取得する
-     */
     private fun getFilename(uri: Uri): String {
-        // ContentResolver の DISPLAY_NAME を優先
         try {
             val cursor = contentResolver.query(
                 uri,
@@ -204,21 +187,14 @@ class ShareReceiver : ComponentActivity() {
         } catch (e: Exception) {
             Log.d(TAG, "Could not query display name: ${e.message}")
         }
-        // fallback: URI の lastPathSegment
         return uri.lastPathSegment ?: ""
     }
 
-    /**
-     * ファイル名がファイル解析対象の拡張子を持つか
-     */
     private fun hasFileExtension(filename: String): Boolean {
         val lower = filename.lowercase()
         return FILE_EXTENSIONS.any { lower.endsWith(it) }
     }
 
-    /**
-     * MIME タイプがファイル解析対象か
-     */
     private fun hasFileMimeType(mimeType: String): Boolean {
         val lower = mimeType.lowercase()
         return FILE_MIME_PARTS.any { lower.contains(it) }
@@ -246,8 +222,7 @@ class ShareReceiver : ComponentActivity() {
             }
         } else {
             "【共有テキスト受信】\n\n$text\n\n" +
-                    "(エンジン未ロードのため要約はスキップされました。" +
-                    "メインアプリでエンジンをロードしてから再度共有してください)"
+                    "(エンジン未ロードのため要約はスキップされました)"
         }
     }
 
@@ -295,8 +270,7 @@ class ShareReceiver : ComponentActivity() {
     }
 
     /**
-     * ファイル処理（Phase 8 統合）
-     * MIME タイプ / ファイル名でパーサーを振り分ける
+     * ファイル処理: CSV / Excel はインデックス登録、PDF も登録、ソースコードは構造解析のみ
      */
     private suspend fun processFile(uri: Uri, mimeType: String): String {
         val filename = getFilename(uri)
@@ -305,14 +279,22 @@ class ShareReceiver : ComponentActivity() {
 
         Log.i(TAG, "processFile: mime=$resolvedMime, filename=$filename")
 
+        val sheetsIndex = NexusApplication.getInstance().sheetsIndex
+
         return when {
             // CSV
             resolvedMime.contains("csv") || resolvedMime.contains("comma-separated") ||
                     lowerFilename.endsWith(".csv") -> {
                 val result = ExcelCsvParser.parseFromUri(applicationContext, uri, resolvedMime)
                 if (result.isSuccess) {
-                    "【CSV 解析結果】\n${result.rowCount} 行 × ${result.colCount} 列 (${result.processingTimeMs}ms)\n\n" +
-                            result.toTextTable()
+                    val fileId = sheetsIndex.addParsedTable(result.rows, filename, "csv")
+                    buildString {
+                        appendLine("「$filename」を登録しました。")
+                        appendLine("${result.rowCount} 行 × ${result.colCount} 列 (${result.processingTimeMs}ms)")
+                        appendLine()
+                        appendLine("チャットから検索・質問できます。")
+                        appendLine("例: 「東京の売上」「売上の合計」「○○を検索」")
+                    }
                 } else {
                     result.errorMessage ?: "CSV 解析失敗"
                 }
@@ -324,8 +306,14 @@ class ShareReceiver : ComponentActivity() {
                     lowerFilename.endsWith(".xlsx") || lowerFilename.endsWith(".xls") -> {
                 val result = ExcelCsvParser.parseFromUri(applicationContext, uri, resolvedMime)
                 if (result.isSuccess) {
-                    "【Excel 解析結果】\n${result.rowCount} 行 × ${result.colCount} 列 (${result.processingTimeMs}ms)\n\n" +
-                            result.toTextTable()
+                    val fileId = sheetsIndex.addParsedTable(result.rows, filename, "xlsx")
+                    buildString {
+                        appendLine("「$filename」を登録しました。")
+                        appendLine("${result.rowCount} 行 × ${result.colCount} 列 (${result.processingTimeMs}ms)")
+                        appendLine()
+                        appendLine("チャットから検索・質問できます。")
+                        appendLine("例: 「東京の売上」「売上の合計」「○○を検索」")
+                    }
                 } else {
                     result.errorMessage ?: "Excel 解析失敗"
                 }
@@ -335,28 +323,24 @@ class ShareReceiver : ComponentActivity() {
             resolvedMime.contains("pdf") || lowerFilename.endsWith(".pdf") -> {
                 val result = PdfExtractor.extractFromUri(applicationContext, uri)
                 if (result.isSuccess) {
-                    result.toSummaryText()
+                    val pageTexts = result.pages.map { it.text }
+                    val fileId = sheetsIndex.addPdfText(pageTexts, filename)
+                    buildString {
+                        appendLine("「$filename」を登録しました。")
+                        appendLine("${result.processedPages}/${result.totalPages} ページ (${result.processingTimeMs}ms)")
+                        appendLine()
+                        appendLine("チャットから検索・質問できます。")
+                        appendLine("例: 「○○を検索」「○○について教えて」")
+                    }
                 } else {
                     result.errorMessage ?: "PDF 解析失敗"
                 }
             }
 
-            // ソースコード / テキスト系ファイル
+            // ソースコード / テキスト系（インデックス対象外、構造解析のみ）
             resolvedMime.startsWith("text/") ||
                     resolvedMime.contains("octet-stream") ||
-                    lowerFilename.endsWith(".kt") || lowerFilename.endsWith(".kts") ||
-                    lowerFilename.endsWith(".java") || lowerFilename.endsWith(".py") ||
-                    lowerFilename.endsWith(".js") || lowerFilename.endsWith(".ts") ||
-                    lowerFilename.endsWith(".c") || lowerFilename.endsWith(".cpp") ||
-                    lowerFilename.endsWith(".h") || lowerFilename.endsWith(".hpp") ||
-                    lowerFilename.endsWith(".swift") || lowerFilename.endsWith(".go") ||
-                    lowerFilename.endsWith(".rs") || lowerFilename.endsWith(".dart") ||
-                    lowerFilename.endsWith(".json") || lowerFilename.endsWith(".xml") ||
-                    lowerFilename.endsWith(".yaml") || lowerFilename.endsWith(".yml") ||
-                    lowerFilename.endsWith(".md") || lowerFilename.endsWith(".sh") ||
-                    lowerFilename.endsWith(".sql") || lowerFilename.endsWith(".html") ||
-                    lowerFilename.endsWith(".css") || lowerFilename.endsWith(".gradle") ||
-                    lowerFilename.endsWith(".toml") || lowerFilename.endsWith(".properties") -> {
+                    FILE_EXTENSIONS.any { lowerFilename.endsWith(it) } -> {
                 val result = SourceCodeParser.parseFromUri(applicationContext, uri, resolvedMime)
                 if (result.isSuccess) {
                     result.toSummaryText()
