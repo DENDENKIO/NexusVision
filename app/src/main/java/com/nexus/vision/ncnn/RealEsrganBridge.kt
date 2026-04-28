@@ -40,4 +40,9 @@ object RealEsrganBridge {
         aiEnhancedBitmap: Bitmap,  // AI超解像→元サイズにリサイズ
         aiLowResBitmap: Bitmap     // AI入力の低解像度版
     ): Bitmap?
+
+    // Streaming JPEG 書き出し
+    external fun nativeJpegBeginWrite(fd: Int, width: Int, height: Int, quality: Int): Long
+    external fun nativeJpegWriteRows(ctxPtr: Long, bitmap: Bitmap, startRow: Int, numRows: Int): Int
+    external fun nativeJpegEndWrite(ctxPtr: Long): Int
 }

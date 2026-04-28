@@ -10,6 +10,7 @@
 #include "realesrgan_simple.h"
 #include "image_fusion.h"
 #include "gpu.h"
+#include "streaming_jpeg.h"
 
 #define TAG "RealESRGAN_JNI"
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO, TAG, __VA_ARGS__)
@@ -494,6 +495,65 @@ Java_com_nexus_vision_ncnn_RealEsrganBridge_nativeFusionPipeline(
 
     LOGI("FusionPipeline output: %dx%d", w, h);
     return outBitmap;
+}
+
+JNIEXPORT jlong JNICALL
+Java_com_nexus_vision_ncnn_RealEsrganBridge_nativeJpegBeginWrite(
+    JNIEnv* env, jclass clazz, jint fd, jint width, jint height, jint quality) {
+    StreamingJpegCtx* ctx = streamingJpegBegin(fd, width, height, quality);
+    return (jlong)ctx;
+}
+
+JNIEXPORT jint JNICALL
+Java_com_nexus_vision_ncnn_RealEsrganBridge_nativeJpegWriteRows(
+    JNIEnv* env, jclass clazz, jlong ctxPtr, jobject bitmap, jint startRow, jint numRows) {
+    StreamingJpegCtx* ctx = (StreamingJpegCtx*)ctxPtr;
+    if (!ctx) return -1;
+
+    AndroidBitmapInfo info;
+    if (AndroidBitmap_getInfo(env, bitmap, &info) != 0) return -1;
+
+    void* pixels = nullptr;
+    if (AndroidBitmap_lockPixels(env, bitmap, &pixels) != 0) return -1;
+
+    // Bitmap 全体を対象にして、指定した開始行から numRows 分のデータを渡す
+    unsigned char* startPtr = (unsigned char*)pixels + (size_t)startRow * info.stride;
+    
+    // streamingJpegWriteRows は内部で 1行ずつ RGB 変換するので、
+    // ここから渡すデータは RGBA (stride を考慮したスキャンライン) である必要があるが、
+    // streaming_jpeg.cpp の実装に合わせて RGBA 密なデータを想定するか、
+    // もしくは stride を考慮するように実装を調整する。
+    // 今回の streaming_jpeg.cpp は rgbaRows を 4倍して進めているので、
+    // 密なRGBAデータを渡す必要がある。
+    
+    // もし bitmap の stride が width * 4 と一致しない場合は、一旦密なバッファにコピーする必要がある。
+    // 通常 Android の Bitmap.Config.ARGB_8888 では stride == width * 4 であることが多いが、
+    // 安全のためにチェックまたはコピーを行う。
+    
+    int ret = 0;
+    if (info.stride == info.width * 4) {
+        ret = streamingJpegWriteRows(ctx, startPtr, numRows);
+    } else {
+        // Stride が異なる場合のフォールバック（低速だが安全）
+        std::vector<unsigned char> denseBuffer(info.width * 4 * numRows);
+        for (int i = 0; i < numRows; i++) {
+            memcpy(denseBuffer.data() + i * info.width * 4, 
+                   (unsigned char*)pixels + (size_t)(startRow + i) * info.stride, 
+                   info.width * 4);
+        }
+        ret = streamingJpegWriteRows(ctx, denseBuffer.data(), numRows);
+    }
+
+    AndroidBitmap_unlockPixels(env, bitmap);
+    return (jint)ret;
+}
+
+JNIEXPORT jint JNICALL
+Java_com_nexus_vision_ncnn_RealEsrganBridge_nativeJpegEndWrite(
+    JNIEnv* env, jclass clazz, jlong ctxPtr) {
+    StreamingJpegCtx* ctx = (StreamingJpegCtx*)ctxPtr;
+    if (!ctx) return -1;
+    return streamingJpegEnd(ctx);
 }
 
 } // extern "C"

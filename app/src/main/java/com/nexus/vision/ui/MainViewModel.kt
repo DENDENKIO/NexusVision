@@ -26,6 +26,7 @@ import com.nexus.vision.image.RegionDecoder
 import com.nexus.vision.ocr.MlKitOcrEngine
 import com.nexus.vision.ui.components.ChatMessage
 import com.nexus.vision.pipeline.RouteCProcessor
+import com.nexus.vision.ncnn.RealEsrganBridge
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
@@ -611,7 +612,58 @@ class MainViewModel : ViewModel() {
 
     // ── ヘルパー ──
 
+    /**
+     * libjpeg-turbo を使用したストリーミング JPEG 保存
+     * メモリ消費を抑えるため、スキャンライン単位で書き出す
+     */
+    private fun saveBitmapToGalleryStreaming(bitmap: Bitmap, prefix: String = "NEXUS", quality: Int = 95): Uri? {
+        val context = app.applicationContext
+        val timestamp = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date())
+        val filename = "${prefix}_${timestamp}.jpg"
+
+        val contentValues = ContentValues().apply {
+            put(MediaStore.Images.Media.DISPLAY_NAME, filename)
+            put(MediaStore.Images.Media.MIME_TYPE, "image/jpeg")
+            put(MediaStore.Images.Media.RELATIVE_PATH, Environment.DIRECTORY_PICTURES + "/NexusVision")
+            put(MediaStore.Images.Media.IS_PENDING, 1)
+        }
+
+        val resolver = context.contentResolver
+        val uri = resolver.insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, contentValues) ?: return null
+
+        try {
+            resolver.openFileDescriptor(uri, "w")?.use { pfd ->
+                val fd = pfd.detachFd()
+                val ctx = RealEsrganBridge.nativeJpegBeginWrite(fd, bitmap.width, bitmap.height, quality)
+                if (ctx != 0L) {
+                    val batchRows = 64
+                    for (row in 0 until bitmap.height step batchRows) {
+                        val numRows = if (row + batchRows > bitmap.height) bitmap.height - row else batchRows
+                        RealEsrganBridge.nativeJpegWriteRows(ctx, bitmap, row, numRows)
+                    }
+                    RealEsrganBridge.nativeJpegEndWrite(ctx)
+                }
+            }
+
+            contentValues.clear()
+            contentValues.put(MediaStore.Images.Media.IS_PENDING, 0)
+            resolver.update(uri, contentValues, null, null)
+            Log.i(TAG, "Streaming saved to gallery: $filename (uri=$uri)")
+            return uri
+        } catch (e: Exception) {
+            Log.e(TAG, "Streaming save failed: ${e.message}")
+            resolver.delete(uri, null, null)
+            return null
+        }
+    }
+
     private fun saveBitmapToGallery(bitmap: Bitmap, prefix: String = "NEXUS"): Uri? {
+        // 4096px超の大規模画像は OOM 回避のためストリーミング保存を使用
+        if (bitmap.width * bitmap.height > 4096 * 4096) {
+            Log.i(TAG, "Using streaming save for large image (${bitmap.width}x${bitmap.height})")
+            return saveBitmapToGalleryStreaming(bitmap, prefix)
+        }
+
         val context = app.applicationContext
         val timestamp = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date())
         val filename = "${prefix}_${timestamp}.jpg"
