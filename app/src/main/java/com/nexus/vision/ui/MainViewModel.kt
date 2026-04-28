@@ -41,6 +41,11 @@ import java.io.IOException
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
+import androidx.work.ExistingWorkPolicy
+import androidx.work.OneTimeWorkRequestBuilder
+import androidx.work.WorkManager
+import com.nexus.vision.worker.BatchEnhanceQueue
+import com.nexus.vision.worker.BatchEnhanceWorker
 
 /** 範囲選択の目的 */
 enum class CropPurpose {
@@ -65,7 +70,10 @@ data class MainUiState(
     val cropImageUri: Uri? = null,
     val cropThumbnail: Bitmap? = null,
     val cropImageWidth: Int = 0,
-    val cropImageHeight: Int = 0
+    val cropImageHeight: Int = 0,
+    val isBatchRunning: Boolean = false,
+    val batchProgressText: String = "",
+    val requestBatchPicker: Boolean = false
 )
 
 class MainViewModel : ViewModel() {
@@ -83,6 +91,8 @@ class MainViewModel : ViewModel() {
 
     private var routeC: RouteCProcessor? = null
     private var routeCInitialized = false
+
+    private var batchProgressMessageId: String? = null
 
     private val _uiState = MutableStateFlow(MainUiState())
     val uiState: StateFlow<MainUiState> = _uiState.asStateFlow()
@@ -123,6 +133,48 @@ class MainViewModel : ViewModel() {
 
         addSystemMessage("NEXUS Vision へようこそ。エンジンをロードしてからメッセージを送信してください。")
         initSuperResolution()
+
+        // バッチ進捗監視
+        viewModelScope.launch {
+            BatchEnhanceQueue.progress.collect { progress ->
+                if (!progress.isRunning && progress.total == 0) {
+                    _uiState.value = _uiState.value.copy(
+                        isBatchRunning = false,
+                        batchProgressText = ""
+                    )
+                    return@collect
+                }
+
+                val text = buildString {
+                    if (progress.isPaused) {
+                        append("⏸ 一時停止中 (${progress.pauseReason})")
+                    } else if (progress.isRunning) {
+                        append("🔄 ${progress.completed + 1}/${progress.total} 処理中...")
+                        if (progress.estimatedRemainingMs > 0) {
+                            val min = progress.estimatedRemainingMs / 60_000
+                            val sec = (progress.estimatedRemainingMs % 60_000) / 1_000
+                            append(" 残り約 ${min}分${sec}秒")
+                        }
+                    } else {
+                        append("✅ バッチ完了: ${progress.successCount}/${progress.total} 成功")
+                        if (progress.failed > 0) append("、${progress.failed} 失敗")
+                    }
+                }
+
+                _uiState.value = _uiState.value.copy(
+                    isBatchRunning = progress.isRunning || progress.isPaused,
+                    batchProgressText = text
+                )
+
+                val msgId = batchProgressMessageId
+                if (msgId != null) {
+                    replaceMessage(
+                        msgId,
+                        ChatMessage(id = msgId, role = ChatMessage.Role.ASSISTANT, text = text)
+                    )
+                }
+            }
+        }
     }
 
     private fun initSuperResolution() {
@@ -250,6 +302,25 @@ class MainViewModel : ViewModel() {
         val imageUri = _uiState.value.selectedImageUri
 
         if (text.isBlank() && imageUri == null) return
+
+        // バッチ高画質化コマンド判定
+        val isBatchRequest = text.contains("バッチ", ignoreCase = true) &&
+                (text.contains("高画質", ignoreCase = true) || text.contains("enhance", ignoreCase = true))
+
+        if (isBatchRequest && imageUri == null) {
+            addMessage(ChatMessage(role = ChatMessage.Role.USER, text = text))
+            _uiState.value = _uiState.value.copy(
+                inputText = "",
+                requestBatchPicker = true
+            )
+            addMessage(
+                ChatMessage(
+                    role = ChatMessage.Role.ASSISTANT,
+                    text = "複数画像を選択してください。選択後にバッチ高画質化を開始します。"
+                )
+            )
+            return
+        }
 
         val displayText = text.ifBlank { "この画像を分析してください" }
 
@@ -708,6 +779,54 @@ class MainViewModel : ViewModel() {
         _uiState.value = _uiState.value.copy(
             messages = _uiState.value.messages + message
         )
+    }
+
+    /**
+     * バッチ高画質化を開始する
+     */
+    fun startBatchEnhance(uris: List<Uri>) {
+        if (uris.isEmpty()) return
+
+        addMessage(
+            ChatMessage(
+                role = ChatMessage.Role.USER,
+                text = "バッチ高画質化: ${uris.size} 枚"
+            )
+        )
+
+        val processingId = addProcessingMessage("🔄 バッチ高画質化を開始します (${uris.size} 枚)...")
+        batchProgressMessageId = processingId
+
+        val displayNames = uris.map { uri ->
+            try {
+                val cursor = app.contentResolver.query(
+                    uri,
+                    arrayOf(android.provider.MediaStore.Images.Media.DISPLAY_NAME),
+                    null, null, null
+                )
+                cursor?.use {
+                    if (it.moveToFirst()) it.getString(0) else "image.jpg"
+                } ?: "image.jpg"
+            } catch (e: Exception) {
+                "image.jpg"
+            }
+        }
+
+        BatchEnhanceQueue.enqueue(uris, displayNames)
+
+        val workRequest = OneTimeWorkRequestBuilder<BatchEnhanceWorker>().build()
+        WorkManager.getInstance(app.applicationContext)
+            .enqueueUniqueWork(
+                BatchEnhanceWorker.WORK_NAME,
+                ExistingWorkPolicy.REPLACE,
+                workRequest
+            )
+
+        Log.i(TAG, "Batch enhance started: ${uris.size} images")
+    }
+
+    fun consumeBatchPickerRequest() {
+        _uiState.value = _uiState.value.copy(requestBatchPicker = false)
     }
 
     private fun addSystemMessage(text: String) {

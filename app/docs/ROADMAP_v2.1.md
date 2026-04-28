@@ -144,10 +144,10 @@ org.apache.poi:poi-ooxml:5.5.1  (poi-android wrapper)
 | 1 | プロジェクト基盤 | 2週 | 6 | 新規プロジェクト作成、Gradle構成、Manifest、Application クラス | ✅ 完了 |
 | 2 | エンジン基盤 | 2週 | 6 | NexusEngineManager、EngineSocket、ThermalMonitor、フォアグラウンドサービス | ✅ 完了 |
 | 3 | DEOR + キャッシュ | 2週 | 6 | EntropyCalculator、PHashCalculator、AdaptiveResizer、L1/L2 キャッシュ、ObjectBox | ✅ 完了 |
-| 4 | 基本 UI + バッチ高画質化 | 2週 | 7 | Compose メイン画面、画像選択、単一推論、バッチキュー、WorkManager、進捗通知、サーマル連携 | 🔧 Step 4-1,4-2 完了 |
+| 4 | 基本 UI + バッチ高画質化 | 2週 | 7 | Compose メイン画面、画像選択、単一推論、バッチキュー、WorkManager、進捗通知、サーマル連携 | ✅ 完了 |
 | 5 | 100MP + ドキュメント鮮鋭化 | 2週 | 5 | DirectCrop100MP、DocumentSharpener、ML Kit OCR 統合 | ✅ 完了 |
 | 6 | EASS + FECS | 3週 | 7 | FECSScorer、EASSPipeline、タイル分割・ルート振り分け・結合、閾値テスト | 🔧 FECSScorer のみ完了 |
-| 7 | Real-ESRGAN + 画像補正 | 2週 | 5 | NCNN JNI ブリッジ、RealEsrganBridge、NLM デノイズ、明暗補正、ストリーミング JPEG | 🔧 実機テスト中 |
+| 7 | Real-ESRGAN + 画像補正 | 2週 | 5 | NCNN JNI ブリッジ、RealEsrganBridge、NLM デノイズ、明暗補正、ストリーミング JPEG | ✅ 完了 |
 | 8 | ファイル解析 | 2週 | 4 | ExcelCsvParser、SourceCodeParser、PdfExtractor | ⬜ 未着手 |
 | 9 | OCR + 表復元 | 1週 | 3 | MlKitOcrEngine、TableReconstructor、CSV/Markdown 出力 | ⬜ 未着手 |
 | 10 | OS 統合 | 2週 | 6 | App Actions、Assist API、ACTION_PROCESS_TEXT、ACTION_SEND、クイック設定タイル、HUD | ⬜ 未着手 |
@@ -215,15 +215,15 @@ org.apache.poi:poi-ooxml:5.5.1  (poi-android wrapper)
 
 **Step 4-2** ✅: `ui/MainViewModel.kt` 拡張。画像選択 → DEOR → キャッシュ照合 → 推論 → 結果表示の完全フロー。高画質化・ズーム・OCR の振り分け。ストリーミング JPEG 保存（saveBitmapToGalleryStreaming）も実装済み。
 
-**Step 4-3**: `worker/BatchEnhanceQueue.kt` 作成。data class `BatchItem(uri: Uri, status: Status, resultUri: Uri?, timeMs: Long)`。enum `Status { QUEUED, PROCESSING, DONE, FAILED, PAUSED }`。キュー管理: add, remove, currentItem, progress, estimatedRemainingMs。StateFlow で進捗を UI に公開。
+**Step 4-3** ✅: `worker/BatchEnhanceQueue.kt` 作成。キュー管理、StateFlow で進捗を UI に公開。
 
-**Step 4-4**: `worker/BatchEnhanceWorker.kt` 作成。WorkManager CoroutineWorker。キューから 1 枚ずつ取り出し直列処理。処理フロー: RegionDecoder.decodeSafe(maxSide=4096) → RouteCProcessor.process → saveBitmapToGallery。setForeground() でフォアグラウンドサービス連携（バックグラウンド継続）。1 枚完了ごとに BatchNotificationHelper で通知発行。全完了時に最終通知。
+**Step 4-4** ✅: `worker/BatchEnhanceWorker.kt` 作成。WorkManager CoroutineWorker。直列処理 + フォアグラウンドサービス連携。
 
-**Step 4-5**: `notification/BatchNotificationHelper.kt` 作成。createProgressNotification(current, total, filename) で進捗通知（ongoing）。createCompletionNotification(current, total) で 1 枚完了通知。createFinalNotification(total, successCount, failCount) で全完了通知。createThermalPauseNotification() で発熱一時停止通知。NotificationChannel 作成ヘルパー。
+**Step 4-5** ✅: `notification/BatchNotificationHelper.kt` 作成。進捗・完了・発熱通知管理。
 
-**Step 4-6**: MainViewModel + MainScreen にバッチ UI を追加。MainViewModel: `startBatchEnhance(uris: List<Uri>)` でキュー登録 + Worker 起動、WorkManager の LiveData/Flow で進捗監視、チャットに進捗メッセージ表示（「🔄 2/5 処理中... 残り約 12 分」）。MainScreen: 複数画像選択ボタン（`PickMultipleVisualMedia`）追加、バッチ進捗表示コンポーネント。
+**Step 4-6** ✅: MainViewModel + MainScreen にバッチ UI を統合。複数画像選択、進捗メッセージ表示。
 
-**Step 4-7**: ThermalMonitor とバッチ処理の連携。BatchEnhanceWorker 内で ThermalMonitor.thermalLevel を監視。SEVERE: 5 秒間隔で再チェック、MODERATE 以下で自動再開。CRITICAL: 15 秒間隔で再チェック、通知で一時停止中を表示。EMERGENCY: 処理中断、完了済み分は保存済み、中断通知を発行。
+**Step 4-7** ✅: ThermalMonitor とバッチ処理の連携。熱レベルに応じた自動一時停止・再開・中断ロジック。
 
 ---
 
@@ -269,7 +269,7 @@ org.apache.poi:poi-ooxml:5.5.1  (poi-android wrapper)
 
 **Step 7-4** ✅: MainViewModel から RouteCProcessor 経由で超解像を呼び出し、結果を saveBitmapToGallery（自動ストリーミング分岐）で保存する完全フロー実装済み。
 
-**Step 7-5** 🔧: 実機テスト。S200 で 4× 拡大の処理時間・品質検証。大画像ストリーミング JPEG 保存テスト。
+**Step 7-5** ✅: 実機テスト。S200 で 4× 拡大の処理時間・品質検証。大画像ストリーミング JPEG 保存テスト。`memset` 未定義エラーや `jversion.h` 不足も修正済み。
 
 ---
 
@@ -373,9 +373,9 @@ org.apache.poi:poi-ooxml:5.5.1  (poi-android wrapper)
 |---|---|---|
 | 2 | Phase 1 完了：プロジェクトビルド成功 | ✅ 完了 |
 | 6 | Phase 2-3 完了：エンジン + DEOR + キャッシュ動作 | ✅ 完了 |
-| 10 | Phase 4-5 完了：基本 UI + 100MP + OCR 動作 | 🔧 Phase 4 バッチ処理が残り |
+| 10 | Phase 4-5 完了：基本 UI + 100MP + OCR 動作 | ✅ 完了 |
 | 13 | Phase 6 完了：EASS + FECS 初回動作 | 🔧 EASSPipeline 未作成 |
-| 15 | Phase 7 完了：Real-ESRGAN 統合 | 🔧 実機テスト中（ネイティブ層完了） |
+| 15 | Phase 7 完了：Real-ESRGAN 統合 | ✅ 完了 |
 | 18 | Phase 8-9 完了：ファイル解析 + 表復元 | ⬜ 未着手 |
 | 20 | Phase 10 完了：OS 統合 | ⬜ 未着手 |
 | 22 | Phase 11-13 完了：記憶 + ウィジェット + SDK | ⬜ 未着手 |
@@ -384,14 +384,12 @@ org.apache.poi:poi-ooxml:5.5.1  (poi-android wrapper)
 
 ---
 
-## 次のアクション（Phase 4 Step 4-3 から開始）
+## 次のアクション（Phase 6 Step 6-2 から開始）
 
 コード作成 AI に渡す順序:
 
-1. `worker/BatchEnhanceQueue.kt` — データ構造の定義（Step 4-3）
-2. `worker/BatchEnhanceWorker.kt` — 処理本体（Step 4-4）
-3. `notification/BatchNotificationHelper.kt` — 通知（Step 4-5）
-4. `ui/MainViewModel.kt` への追加 + `ui/MainScreen.kt` への複数選択 UI 追加（Step 4-6）
-5. ThermalMonitor 連携（Step 4-7）
+1. `image/EASSPipeline.kt` — カテゴリ分けロジックの実装（Step 6-2）
+2. RouteA/B/C の統合呼び出し（Step 6-3, 6-4, 6-5）
+3. TileManager との結合（Step 6-6）
 
 ---

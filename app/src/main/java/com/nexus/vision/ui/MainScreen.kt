@@ -2,6 +2,7 @@
 
 package com.nexus.vision.ui
 
+import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -42,7 +43,9 @@ import com.nexus.vision.ui.components.CropSelector
 fun MainScreen(
     viewModel: MainViewModel = viewModel(),
     onPickImage: () -> Unit = {},
-    onImageSelected: ((android.net.Uri) -> Unit) -> Unit = {}
+    onPickMultipleImages: () -> Unit = {},
+    onImageSelected: ((android.net.Uri) -> Unit) -> Unit = {},
+    onMultipleImagesSelected: ((List<android.net.Uri>) -> Unit) -> Unit = {}
 ) {
     val uiState by viewModel.uiState.collectAsState()
     val listState = rememberLazyListState()
@@ -50,6 +53,17 @@ fun MainScreen(
     LaunchedEffect(Unit) {
         onImageSelected { uri ->
             viewModel.setSelectedImage(uri)
+        }
+        onMultipleImagesSelected { uris ->
+            viewModel.startBatchEnhance(uris)
+        }
+    }
+
+    // バッチピッカーのリクエスト監視
+    LaunchedEffect(uiState.requestBatchPicker) {
+        if (uiState.requestBatchPicker) {
+            viewModel.consumeBatchPickerRequest()
+            onPickMultipleImages()
         }
     }
 
@@ -85,6 +99,22 @@ fun MainScreen(
                     .windowInsetsPadding(WindowInsets.navigationBars)
             ) {
                 HorizontalDivider()
+
+                // バッチ進捗表示
+                if (uiState.isBatchRunning && uiState.batchProgressText.isNotEmpty()) {
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .background(MaterialTheme.colorScheme.secondaryContainer)
+                            .padding(12.dp)
+                    ) {
+                        Text(
+                            text = uiState.batchProgressText,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSecondaryContainer
+                        )
+                    }
+                }
 
                 // 範囲選択モード中はクロップUIを表示
                 if (uiState.cropMode && uiState.cropThumbnail != null) {

@@ -4,6 +4,7 @@ package com.nexus.vision
 
 import android.Manifest
 import android.content.pm.PackageManager
+import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.util.Log
@@ -16,21 +17,14 @@ import androidx.core.content.ContextCompat
 import com.nexus.vision.ui.MainScreen
 import com.nexus.vision.ui.theme.NexusVisionTheme
 
-/**
- * NEXUS Vision メインエントリーポイント
- *
- * Phase 4 修正: onPickImage をラムダで直接渡す。
- *   ViewModel は MainScreen 内で viewModel() で生成させ、
- *   画像選択の結果だけ外から注入する。
- */
 class MainActivity : ComponentActivity() {
 
     companion object {
         private const val TAG = "MainActivity"
     }
 
-    // Phase 4: 画像選択ランチャー（コールバックは後で設定）
-    private var onImageSelected: ((android.net.Uri) -> Unit)? = null
+    private var onImageSelected: ((Uri) -> Unit)? = null
+    private var onMultipleImagesSelected: ((List<Uri>) -> Unit)? = null
 
     private val pickMedia =
         registerForActivityResult(ActivityResultContracts.PickVisualMedia()) { uri ->
@@ -40,7 +34,14 @@ class MainActivity : ComponentActivity() {
             }
         }
 
-    // Phase 4: 権限リクエストランチャー
+    private val pickMultipleMedia =
+        registerForActivityResult(ActivityResultContracts.PickMultipleVisualMedia(20)) { uris ->
+            if (uris.isNotEmpty()) {
+                Log.d(TAG, "Multiple images selected: ${uris.size}")
+                onMultipleImagesSelected?.invoke(uris)
+            }
+        }
+
     private val requestPermissions =
         registerForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { grants ->
             for ((permission, granted) in grants) {
@@ -51,15 +52,18 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
-
         requestRequiredPermissions()
 
         setContent {
             NexusVisionTheme {
                 MainScreen(
                     onPickImage = { launchImagePicker() },
+                    onPickMultipleImages = { launchMultipleImagePicker() },
                     onImageSelected = { callback ->
                         onImageSelected = callback
+                    },
+                    onMultipleImagesSelected = { callback ->
+                        onMultipleImagesSelected = callback
                     }
                 )
             }
@@ -72,9 +76,14 @@ class MainActivity : ComponentActivity() {
         )
     }
 
+    private fun launchMultipleImagePicker() {
+        pickMultipleMedia.launch(
+            PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)
+        )
+    }
+
     private fun requestRequiredPermissions() {
         val permissions = mutableListOf<String>()
-
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             if (ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS)
                 != PackageManager.PERMISSION_GRANTED
@@ -82,13 +91,11 @@ class MainActivity : ComponentActivity() {
                 permissions.add(Manifest.permission.POST_NOTIFICATIONS)
             }
         }
-
         if (ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA)
             != PackageManager.PERMISSION_GRANTED
         ) {
             permissions.add(Manifest.permission.CAMERA)
         }
-
         if (permissions.isNotEmpty()) {
             requestPermissions.launch(permissions.toTypedArray())
         }
