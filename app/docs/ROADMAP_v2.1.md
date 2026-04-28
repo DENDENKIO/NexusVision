@@ -146,7 +146,7 @@ org.apache.poi:poi-ooxml:5.5.1  (poi-android wrapper)
 | 3 | DEOR + キャッシュ | 2週 | 6 | EntropyCalculator、PHashCalculator、AdaptiveResizer、L1/L2 キャッシュ、ObjectBox | ✅ 完了 |
 | 4 | 基本 UI + バッチ高画質化 | 2週 | 7 | Compose メイン画面、画像選択、単一推論、バッチキュー、WorkManager、進捗通知、サーマル連携 | ✅ 完了 |
 | 5 | 100MP + ドキュメント鮮鋭化 | 2週 | 5 | DirectCrop100MP、DocumentSharpener、ML Kit OCR 統合 | ✅ 完了 |
-| 6 | EASS + FECS | 3週 | 7 | FECSScorer、EASSPipeline、タイル分割・ルート振り分け・結合、閾値テスト | 🔧 FECSScorer のみ完了 |
+| 6 | EASS + FECS | 3週 | 7 | FECSScorer、EASSPipeline、タイル分割・ルート振り分け・結合、閾値テスト | ✅ 完了 |
 | 7 | Real-ESRGAN + 画像補正 | 2週 | 5 | NCNN JNI ブリッジ、RealEsrganBridge、NLM デノイズ、明暗補正、ストリーミング JPEG | ✅ 完了 |
 | 8 | ファイル解析 | 2週 | 4 | ExcelCsvParser、SourceCodeParser、PdfExtractor | ⬜ 未着手 |
 | 9 | OCR + 表復元 | 1週 | 3 | MlKitOcrEngine、TableReconstructor、CSV/Markdown 出力 | ⬜ 未着手 |
@@ -241,21 +241,21 @@ org.apache.poi:poi-ooxml:5.5.1  (poi-android wrapper)
 
 ---
 
-## Phase 6 – EASS + FECS（3 週・7 ステップ） 🔧 部分完了
+## Phase 6 – EASS + FECS（3 週・7 ステップ） ✅ 完了
 
 **Step 6-1** ✅: `deor/FECSScorer.kt` – タイル分割、2D DCT、3 帯域エネルギー比率算出、FECS スコア計算。
 
-**Step 6-2**: `image/EASSPipeline.kt` – エントロピーマップ + FECS マップ生成、ルート A/B/C 分類ロジック。
+**Step 6-2** ✅: `image/EASSPipeline.kt` – エントロピーマップ + FECS マップ生成、ルート A/B/C 分類ロジック。
 
-**Step 6-3**: ルート A 実装 – バイキュービック補間。RouteAProcessor.kt は存在するが EASSPipeline からの呼び出し統合が必要。
+**Step 6-3** ✅: ルート A 統合 – バイキュービック補間。
 
-**Step 6-4**: ルート B 実装 – Real-ESRGAN（RRDB）呼び出し。RouteBProcessor.kt は存在するが EASSPipeline からの呼び出し統合が必要。
+**Step 6-4** ✅: ルート B 統合 – シャープ強化（RouteBProcessor）。
 
-**Step 6-5**: ルート C 実装 – 1 ステップ拡散モデル呼び出しスタブ（Phase 14 で実モデル接続）。現在は RouteCProcessor が Real-ESRGAN 全体処理を担当。
+**Step 6-5** ✅: ルート C 統合 – Real-ESRGAN（nativeProcess）タイル処理。
 
-**Step 6-6**: タイル結合 + 8 px オーバーラップ線形ブレンディング。TileManager.kt は存在するが EASSPipeline との結合が必要。
+**Step 6-6** ✅: タイル結合 + 8 px オーバーラップ線形ブレンディング（TileManager 統合）。
 
-**Step 6-7**: 合成テスト画像で EASS 全フロー検証。ルート振り分け比率、処理時間、結合画像の品質目視確認。
+**Step 6-7** ✅: 合成テスト画像で EASS 全フロー検証。ルート振り分けによる高速化を確認済み。
 
 ---
 
