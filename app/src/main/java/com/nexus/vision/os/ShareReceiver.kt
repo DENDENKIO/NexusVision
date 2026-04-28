@@ -12,6 +12,8 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
@@ -24,10 +26,12 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
-import com.nexus.vision.NexusApplication
 import com.nexus.vision.engine.EngineState
 import com.nexus.vision.engine.NexusEngineManager
 import com.nexus.vision.ocr.MlKitOcrEngine
+import com.nexus.vision.parser.ExcelCsvParser
+import com.nexus.vision.parser.PdfExtractor
+import com.nexus.vision.parser.SourceCodeParser
 import com.nexus.vision.ui.theme.NexusVisionTheme
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -36,15 +40,8 @@ import kotlinx.coroutines.withContext
  * ACTION_SEND / ACTION_SEND_MULTIPLE で共有された
  * 画像・テキスト・ファイルを受信する Activity。
  *
- * 他アプリの共有メニューに「NEXUS Vision」として表示される。
- *
- * 受信データに応じて:
- *   - テキスト → Gemma-4 で要約/解析
- *   - 画像(1枚) → OCR テキスト抽出
- *   - 画像(複数) → バッチ OCR
- *   - ファイル → 将来対応(Phase 8)
- *
  * Phase 10: OS 統合
+ * Phase 8: ファイル解析統合
  */
 class ShareReceiver : ComponentActivity() {
 
@@ -85,7 +82,9 @@ class ShareReceiver : ComponentActivity() {
                             }
                         } else {
                             Column(
-                                modifier = Modifier.fillMaxWidth(),
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .verticalScroll(rememberScrollState()),
                                 horizontalAlignment = Alignment.CenterHorizontally
                             ) {
                                 Text(
@@ -105,9 +104,6 @@ class ShareReceiver : ComponentActivity() {
         }
     }
 
-    /**
-     * Intent からデータを解析する
-     */
     private fun parseIntent(intent: Intent): ReceivedData {
         val action = intent.action
         val type = intent.type ?: ""
@@ -116,8 +112,18 @@ class ShareReceiver : ComponentActivity() {
 
         return when {
             action == Intent.ACTION_SEND && type.startsWith("text/") -> {
-                val text = intent.getStringExtra(Intent.EXTRA_TEXT) ?: ""
-                ReceivedData.TextData(text)
+                // text/plain はテキスト、text/csv は CSV として扱う
+                if (type.contains("csv")) {
+                    val uri = intent.getParcelableExtra<Uri>(Intent.EXTRA_STREAM)
+                    if (uri != null) ReceivedData.FileData(uri, type)
+                    else {
+                        val text = intent.getStringExtra(Intent.EXTRA_TEXT) ?: ""
+                        ReceivedData.TextData(text)
+                    }
+                } else {
+                    val text = intent.getStringExtra(Intent.EXTRA_TEXT) ?: ""
+                    ReceivedData.TextData(text)
+                }
             }
             action == Intent.ACTION_SEND && type.startsWith("image/") -> {
                 val uri = intent.getParcelableExtra<Uri>(Intent.EXTRA_STREAM)
@@ -130,7 +136,6 @@ class ShareReceiver : ComponentActivity() {
                 else ReceivedData.Empty
             }
             action == Intent.ACTION_SEND -> {
-                // その他のファイル
                 val uri = intent.getParcelableExtra<Uri>(Intent.EXTRA_STREAM)
                 if (uri != null) ReceivedData.FileData(uri, type)
                 else ReceivedData.Empty
@@ -139,9 +144,6 @@ class ShareReceiver : ComponentActivity() {
         }
     }
 
-    /**
-     * 受信データに応じた処理を実行する
-     */
     private suspend fun processReceivedData(data: ReceivedData): String =
         withContext(Dispatchers.IO) {
             when (data) {
@@ -153,9 +155,6 @@ class ShareReceiver : ComponentActivity() {
             }
         }
 
-    /**
-     * テキスト解析: エンジンが Ready ならGemma-4で要約、そうでなければテキストをそのまま表示
-     */
     private suspend fun processText(text: String): String {
         if (text.isBlank()) return "テキストが空です"
 
@@ -172,9 +171,6 @@ class ShareReceiver : ComponentActivity() {
         }
     }
 
-    /**
-     * 画像 OCR
-     */
     private suspend fun processImage(uri: Uri): String {
         val ocrEngine = MlKitOcrEngine()
         return try {
@@ -192,9 +188,6 @@ class ShareReceiver : ComponentActivity() {
         }
     }
 
-    /**
-     * 複数画像の一括 OCR
-     */
     private suspend fun processMultipleImages(uris: List<Uri>): String {
         val ocrEngine = MlKitOcrEngine()
         val results = StringBuilder()
@@ -222,17 +215,76 @@ class ShareReceiver : ComponentActivity() {
     }
 
     /**
-     * ファイル受信（将来対応: Phase 8）
+     * ファイル処理（Phase 8 統合）
+     * MIME タイプ / ファイル名でパーサーを振り分ける
      */
-    private fun processFile(uri: Uri, mimeType: String): String {
-        return "ファイルを受信しました (type=$mimeType)\n\n" +
-                "対応ファイル形式のパーサーは Phase 8 で実装予定です。\n" +
-                "現在対応: 画像（OCR）、テキスト（要約）"
+    private suspend fun processFile(uri: Uri, mimeType: String): String {
+        val filename = uri.lastPathSegment ?: ""
+        Log.i(TAG, "processFile: mime=$mimeType, filename=$filename")
+
+        return when {
+            // CSV
+            mimeType.contains("csv") || mimeType.contains("comma-separated") ||
+                    filename.endsWith(".csv", ignoreCase = true) -> {
+                val result = ExcelCsvParser.parseFromUri(applicationContext, uri, mimeType)
+                if (result.isSuccess) {
+                    "【CSV 解析結果】\n${result.rowCount} 行 × ${result.colCount} 列 (${result.processingTimeMs}ms)\n\n" +
+                            result.toMarkdown()
+                } else {
+                    result.errorMessage ?: "CSV 解析失敗"
+                }
+            }
+
+            // Excel (.xlsx)
+            mimeType.contains("spreadsheetml") || mimeType.contains("xlsx") ||
+                    filename.endsWith(".xlsx", ignoreCase = true) -> {
+                val result = ExcelCsvParser.parseFromUri(applicationContext, uri, mimeType)
+                if (result.isSuccess) {
+                    "【Excel 解析結果】\n${result.rowCount} 行 × ${result.colCount} 列 (${result.processingTimeMs}ms)\n\n" +
+                            result.toMarkdown()
+                } else {
+                    result.errorMessage ?: "Excel 解析失敗"
+                }
+            }
+
+            // PDF
+            mimeType.contains("pdf") || filename.endsWith(".pdf", ignoreCase = true) -> {
+                val result = PdfExtractor.extractFromUri(applicationContext, uri)
+                if (result.isSuccess) {
+                    result.toSummaryText()
+                } else {
+                    result.errorMessage ?: "PDF 解析失敗"
+                }
+            }
+
+            // ソースコード (text/* のうち CSV 以外)
+            mimeType.startsWith("text/") ||
+                    filename.endsWith(".kt") || filename.endsWith(".java") ||
+                    filename.endsWith(".py") || filename.endsWith(".js") ||
+                    filename.endsWith(".ts") || filename.endsWith(".c") ||
+                    filename.endsWith(".cpp") || filename.endsWith(".h") ||
+                    filename.endsWith(".swift") || filename.endsWith(".go") ||
+                    filename.endsWith(".rs") || filename.endsWith(".dart") ||
+                    filename.endsWith(".json") || filename.endsWith(".xml") ||
+                    filename.endsWith(".yaml") || filename.endsWith(".yml") ||
+                    filename.endsWith(".md") || filename.endsWith(".sh") ||
+                    filename.endsWith(".sql") || filename.endsWith(".html") ||
+                    filename.endsWith(".css") -> {
+                val result = SourceCodeParser.parseFromUri(applicationContext, uri, mimeType)
+                if (result.isSuccess) {
+                    result.toSummaryText()
+                } else {
+                    result.errorMessage ?: "ソースコード解析失敗"
+                }
+            }
+
+            else -> {
+                "非対応ファイル形式: $mimeType\n\n" +
+                        "対応形式: 画像(OCR)、テキスト(要約)、CSV、Excel(.xlsx)、PDF、ソースコード"
+            }
+        }
     }
 
-    /**
-     * 受信データの種類
-     */
     sealed class ReceivedData {
         data class TextData(val text: String) : ReceivedData()
         data class SingleImage(val uri: Uri) : ReceivedData()
