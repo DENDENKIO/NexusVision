@@ -2,8 +2,10 @@
 
 package com.nexus.vision.ocr
 
+import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.Rect
+import android.net.Uri
 import android.util.Log
 import com.google.mlkit.vision.common.InputImage
 import com.google.mlkit.vision.text.TextRecognition
@@ -22,6 +24,7 @@ import kotlin.coroutines.suspendCoroutine
  *
  * Phase 5: 基本実装
  * Phase 9: 表復元 (TableReconstructor) と連携
+ * Phase 10: recognizeFromUri 追加 (OS 統合 ShareReceiver 用)
  */
 class MlKitOcrEngine {
 
@@ -87,6 +90,35 @@ class MlKitOcrEngine {
                 Log.e(TAG, "OCR failed", e)
                 cont.resumeWithException(e)
             }
+    }
+
+    /**
+     * Uri から直接 OCR を実行する。
+     * ShareReceiver 等、外部から画像 Uri を受け取って処理する場合に使用。
+     *
+     * @param context アプリケーションコンテキスト
+     * @param uri 画像の Uri
+     * @return 認識されたテキスト（空文字列の場合はテキスト未検出）
+     *
+     * Phase 10: OS 統合
+     */
+    suspend fun recognizeFromUri(context: Context, uri: Uri): String = suspendCoroutine { cont ->
+        try {
+            val inputImage = InputImage.fromFilePath(context, uri)
+
+            recognizer.process(inputImage)
+                .addOnSuccessListener { visionText ->
+                    Log.i(TAG, "recognizeFromUri: ${visionText.text.length} chars")
+                    cont.resume(visionText.text)
+                }
+                .addOnFailureListener { e ->
+                    Log.e(TAG, "recognizeFromUri failed: ${e.message}")
+                    cont.resume("")
+                }
+        } catch (e: Exception) {
+            Log.e(TAG, "recognizeFromUri error: ${e.message}")
+            cont.resume("")
+        }
     }
 
     /**

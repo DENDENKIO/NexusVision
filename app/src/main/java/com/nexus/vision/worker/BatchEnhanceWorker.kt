@@ -79,7 +79,7 @@ class BatchEnhanceWorker(
         }
 
         try {
-            while (true) {
+            batchLoop@ while (true) {
                 // サーマルレベルチェック
                 val thermal = application.thermalMonitor.thermalLevel.value
                 when {
@@ -98,7 +98,7 @@ class BatchEnhanceWorker(
                         BatchEnhanceQueue.markPaused(thermal.name)
                         BatchNotificationHelper.notifyThermalPause(applicationContext, thermal.name)
                         delay(10000) // 10秒待って再チェック
-                        continue
+                        continue@batchLoop
                     }
                     else -> {
                         if (BatchEnhanceQueue.progress.value.isPaused) {
@@ -109,7 +109,7 @@ class BatchEnhanceWorker(
                 }
 
                 // 次のアイテムを取得
-                val item = BatchEnhanceQueue.dequeueNext() ?: break
+                val item = BatchEnhanceQueue.dequeueNext() ?: break@batchLoop
                 
                 // 進捗通知更新
                 val progress = BatchEnhanceQueue.progress.value
