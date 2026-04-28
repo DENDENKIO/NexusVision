@@ -146,7 +146,7 @@ org.apache.poi:poi-ooxml:5.5.1  (poi-android wrapper)
 | 3 | DEOR + キャッシュ | 2週 | 6 | EntropyCalculator、PHashCalculator、AdaptiveResizer、L1/L2 キャッシュ、ObjectBox | ✅ 完了 |
 | 4 | 基本 UI + バッチ高画質化 | 2週 | 7 | Compose メイン画面、画像選択、単一推論、バッチキュー、WorkManager、進捗通知、サーマル連携 | ✅ 完了 |
 | 5 | 100MP + ドキュメント鮮鋭化 | 2週 | 5 | DirectCrop100MP、DocumentSharpener、ML Kit OCR 統合 | ✅ 完了 |
-| 6 | EASS + FECS | 3週 | 7 | FECSScorer、EASSPipeline、タイル分割・ルート振り分け・結合、閾値テスト | ✅ 完了 |
+| 6 | EASS + FECS | 3週 | 7 | FECSScorer、EASSPipeline、タイル分割・ルート振り分け・結合、閾値テスト | ⚠️ 実装済・一時無効化 |
 | 7 | Real-ESRGAN + 画像補正 | 2週 | 5 | NCNN JNI ブリッジ、RealEsrganBridge、NLM デノイズ、明暗補正、ストリーミング JPEG | ✅ 完了 |
 | 8 | ファイル解析 | 2週 | 4 | ExcelCsvParser、SourceCodeParser、PdfExtractor | ⬜ 未着手 |
 | 9 | OCR + 表復元 | 1週 | 3 | MlKitOcrEngine、TableReconstructor、CSV/Markdown 出力 | ⬜ 未着手 |

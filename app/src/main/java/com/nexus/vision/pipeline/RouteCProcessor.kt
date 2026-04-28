@@ -4,111 +4,114 @@ package com.nexus.vision.pipeline
 import android.content.Context
 import android.graphics.Bitmap
 import android.util.Log
-import com.nexus.vision.image.EASSPipeline
+import com.nexus.vision.ncnn.NcnnSuperResolution
 
 /**
- * Route C プロセッサ（統合超解像エントリーポイント）
+ * Route C プロセッサ（超解像エントリーポイント）
  *
- * EASS パイプラインを使用し、タイルごとに最適なルートで処理する。
- * EASS 初期化に失敗した場合は従来の NcnnSuperResolution にフォールバックする。
+ * NcnnSuperResolution の 3-Stage Fusion Pipeline を使用する。
+ * 画像全体を均一に処理し、タイル境界アーティファクトを防止する。
  *
- * Phase 6: EASS 統合
- * Phase 7: Real-ESRGAN 接続済み
+ * EASS パイプラインは Phase 6 で実装済みだが、ルート間の品質差による
+ * ブロックノイズ問題のため一時無効化。将来、ルート間の出力品質を
+ * 均一化した後に再有効化する。
+ *
+ * Phase 7: Real-ESRGAN 接続済み（現行）
+ * Phase 6: EASS 統合（一時無効化）
  */
 class RouteCProcessor(private val context: Context) {
 
     companion object {
         private const val TAG = "RouteCProcessor"
+
+        // EASS を有効にする場合は true にする（現在は無効）
+        private const val ENABLE_EASS = false
     }
 
-    private var eassPipeline: EASSPipeline? = null
-    private var fallbackSr: com.nexus.vision.ncnn.NcnnSuperResolution? = null
-    private var useEASS = false
+    private var sr: NcnnSuperResolution? = null
 
+    /**
+     * NcnnSuperResolution モデルを初期化する。
+     */
     fun initialize(): Boolean {
-        // まず EASS を試す
-        eassPipeline = EASSPipeline(context)
-        useEASS = eassPipeline?.initialize() == true
-
-        if (useEASS) {
-            Log.i(TAG, "EASS Pipeline ready")
-            return true
+        sr = NcnnSuperResolution()
+        val result = sr?.initialize(context) ?: false
+        if (result) {
+            Log.i(TAG, "NcnnSuperResolution initialized (EASS disabled)")
+        } else {
+            Log.e(TAG, "NcnnSuperResolution init failed")
         }
-
-        // EASS 失敗時は従来の NcnnSuperResolution にフォールバック
-        Log.w(TAG, "EASS init failed, falling back to NcnnSuperResolution")
-        fallbackSr = com.nexus.vision.ncnn.NcnnSuperResolution()
-        return fallbackSr?.initialize(context) ?: false
+        return result
     }
 
+    /**
+     * 画像を超解像処理する。
+     *
+     * NcnnSuperResolution.upscale() が内部で自動判定:
+     *   - 小画像 (≤128px): 直接 4× AI 超解像
+     *   - 大画像 (>128px): Tiled Fusion Pipeline (AI + Guided Filter + DWT + IBP)
+     *
+     * @param bitmap 入力画像
+     * @return 処理結果
+     */
     suspend fun process(bitmap: Bitmap): ProcessResult {
         val startTime = System.currentTimeMillis()
 
-        if (useEASS && eassPipeline != null) {
-            return processWithEASS(bitmap, startTime)
-        }
-
-        return processWithFallback(bitmap, startTime)
-    }
-
-    private suspend fun processWithEASS(bitmap: Bitmap, startTime: Long): ProcessResult {
         return try {
-            // scale=1: 等倍で品質向上。大画像(>128px)は EASS で効率的に処理。
-            // scale=4: 4倍拡大。小画像向け。
-            val maxSide = maxOf(bitmap.width, bitmap.height)
-            val scale = if (maxSide <= 128) 4 else 1
-
-            val result = eassPipeline!!.process(bitmap, scale)
+            val result = sr?.upscale(bitmap)
             val elapsed = System.currentTimeMillis() - startTime
 
-            Log.i(TAG, "EASS: ${bitmap.width}x${bitmap.height} → ${result.bitmap.width}x${result.bitmap.height} in ${elapsed}ms")
-            Log.i(TAG, "  ${result.summary()}")
+            if (result != null) {
+                val method = when {
+                    result.width > bitmap.width * 2 ->
+                        "NCNN Real-ESRGAN 4× (Vulkan GPU)"
+                    result.width > bitmap.width ->
+                        "Tiled Laplacian Synthesis (周波数分離)"
+                    else ->
+                        "Fusion Pipeline (品質向上)"
+                }
 
-            ProcessResult(
-                bitmap = result.bitmap,
-                method = result.summary(),
-                elapsedMs = elapsed,
-                success = true
-            )
-        } catch (e: Exception) {
-            Log.e(TAG, "EASS failed: ${e.message}, trying fallback")
-            // EASS 失敗時にフォールバック
-            processWithFallback(bitmap, startTime)
-        }
-    }
+                Log.i(TAG, "Success: ${bitmap.width}x${bitmap.height} → " +
+                        "${result.width}x${result.height} in ${elapsed}ms [$method]")
 
-    private suspend fun processWithFallback(bitmap: Bitmap, startTime: Long): ProcessResult {
-        val result = fallbackSr?.upscale(bitmap) ?: run {
-            // fallbackSr も null の場合は再初期化を試みる
-            fallbackSr = com.nexus.vision.ncnn.NcnnSuperResolution()
-            fallbackSr?.initialize(context)
-            fallbackSr?.upscale(bitmap)
-        }
-
-        val elapsed = System.currentTimeMillis() - startTime
-
-        return if (result != null) {
-            val method = when {
-                result.width > bitmap.width -> "NCNN Real-ESRGAN 4× (Vulkan GPU)"
-                result.width == bitmap.width -> "Tiled Laplacian Synthesis (周波数分離)"
-                else -> "Unsharp Mask シャープ化 (Native)"
+                ProcessResult(
+                    bitmap = result,
+                    method = method,
+                    elapsedMs = elapsed,
+                    success = true
+                )
+            } else {
+                Log.w(TAG, "Processing returned null, returning original")
+                ProcessResult(
+                    bitmap = bitmap,
+                    method = "passthrough (処理失敗)",
+                    elapsedMs = elapsed,
+                    success = false
+                )
             }
-            Log.i(TAG, "Fallback: ${bitmap.width}x${bitmap.height} → ${result.width}x${result.height} in ${elapsed}ms [$method]")
-            ProcessResult(result, method, elapsed, true)
-        } else {
-            Log.w(TAG, "All processing failed, returning original")
-            ProcessResult(bitmap, "passthrough (failed)", elapsed, false)
+        } catch (e: Exception) {
+            val elapsed = System.currentTimeMillis() - startTime
+            Log.e(TAG, "Process error: ${e.message}", e)
+            ProcessResult(
+                bitmap = bitmap,
+                method = "passthrough (エラー: ${e.message})",
+                elapsedMs = elapsed,
+                success = false
+            )
         }
     }
 
+    /**
+     * リソース解放
+     */
     fun release() {
-        eassPipeline?.release()
-        eassPipeline = null
-        fallbackSr?.release()
-        fallbackSr = null
-        useEASS = false
+        sr?.release()
+        sr = null
     }
 
+    /**
+     * 処理結果データクラス
+     */
     data class ProcessResult(
         val bitmap: Bitmap,
         val method: String,
