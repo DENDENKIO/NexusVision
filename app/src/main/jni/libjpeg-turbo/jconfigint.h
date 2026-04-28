@@ -12,9 +12,8 @@
 #ifndef BITS_IN_JSAMPLE
 #define BITS_IN_JSAMPLE  8
 #endif
-/* SIMD disabled - all jsimd_set_*() will return JSIMD_NONE */
 /* #undef C_ARITH_CODING_SUPPORTED */
 /* #undef D_ARITH_CODING_SUPPORTED */
 /* #undef WITH_SIMD */
-#define SIMD_ARCHITECTURE  NONE    /* ← これが重要！ -1 に展開される */
 /* #undef WITH_PROFILE */
+/* #undef SIMD_ARCHITECTURE */
