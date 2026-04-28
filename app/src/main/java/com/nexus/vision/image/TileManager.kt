@@ -95,18 +95,19 @@ object TileManager {
      * @param outputWidth 出力画像幅
      * @param outputHeight 出力画像高さ
      * @param overlap     オーバーラップ量
+     * @param scale       座標スケーリング（EASSPipeline 等でタイルが拡大されている場合）
      * @return 結合された Bitmap
      */
     fun mergeTiles(
         tiles: List<Tile>,
         outputWidth: Int,
         outputHeight: Int,
-        overlap: Int = 8
+        overlap: Int = 8,
+        scale: Int = 1
     ): Bitmap {
         val startTime = System.currentTimeMillis()
 
         val output = Bitmap.createBitmap(outputWidth, outputHeight, Bitmap.Config.ARGB_8888)
-        // Canvas/Paint はここでは使わず、直接ピクセル操作でブレンドを制御する（精度の追求）
         
         // 重み累積用バッファ
         val weightSum = FloatArray(outputWidth * outputHeight)
@@ -121,10 +122,13 @@ object TileManager {
             val tilePixels = IntArray(tileW * tileH)
             tileBitmap.getPixels(tilePixels, 0, tileW, 0, 0, tileW, tileH)
 
+            val scaledX = tile.x * scale
+            val scaledY = tile.y * scale
+
             for (ty in 0 until tileH) {
                 for (tx in 0 until tileW) {
-                    val outX = tile.x + tx
-                    val outY = tile.y + ty
+                    val outX = scaledX + tx
+                    val outY = scaledY + ty
                     if (outX >= outputWidth || outY >= outputHeight) continue
 
                     // オーバーラップ領域で線形ブレンド重みを計算

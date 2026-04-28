@@ -1,3 +1,5 @@
+// ファイルパス: app/src/main/java/com/nexus/vision/image/EASSPipeline.kt
+
 package com.nexus.vision.image
 
 import android.graphics.Bitmap
@@ -124,7 +126,8 @@ class EASSPipeline(
                 tiles,
                 outputWidth,
                 outputHeight,
-                OVERLAP * targetScale
+                OVERLAP * targetScale,
+                targetScale
             )
 
             // 5. タイル用 Bitmap をすべて解放
