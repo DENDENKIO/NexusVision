@@ -223,7 +223,7 @@ org.apache.poi:poi-ooxml:5.5.1  (poi-android wrapper)
 
 **Step 4-6** ✅: MainViewModel + MainScreen にバッチ UI を統合。複数画像選択、進捗メッセージ表示。
 
-**Step 4-7** ✅: ThermalMonitor とバッチ処理の連携。熱レベルに応じた自動一時停止・再開・中断ロジック。
+**Step 4-7** ✅: ThermalMonitor とバッチ処理の連携。熱レベルに応じた自動一時停止・再開・中断ロジック。バッチ用デコードサイズを 2048px に制限し、タイル数を削減して処理効率を最適化（1枚約4分程度）。
 
 ---
 

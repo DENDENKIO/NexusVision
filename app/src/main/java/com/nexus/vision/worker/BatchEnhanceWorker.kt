@@ -19,9 +19,7 @@ import com.nexus.vision.image.RegionDecoder
 import com.nexus.vision.ncnn.RealEsrganBridge
 import com.nexus.vision.notification.BatchNotificationHelper
 import com.nexus.vision.pipeline.RouteCProcessor
-import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
-import kotlinx.coroutines.withContext
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -35,20 +33,41 @@ class BatchEnhanceWorker(
 ) : CoroutineWorker(context, params) {
 
     companion object {
-        const val WORK_NAME = "nexus_batch_enhance"
         private const val TAG = "BatchEnhanceWorker"
+        const val WORK_NAME = "nexus_batch_enhance"
+
+        /**
+         * バッチ処理用のデコード最大辺
+         * 2048px に制限してタイル数を 1/4 に抑える。
+         * タイル数: 約 256〜300（処理時間 約 4〜5 分/枚）
+         */
+        private const val BATCH_MAX_DECODE_SIDE = 2048
+
+        private const val JPEG_QUALITY = 95
+        private const val THERMAL_CHECK_SEVERE_MS = 5_000L
+        private const val THERMAL_CHECK_CRITICAL_MS = 15_000L
     }
 
     private val application = NexusApplication.getInstance()
     private var routeC: RouteCProcessor? = null
 
-    override suspend fun doWork(): Result = withContext(Dispatchers.IO) {
+    override suspend fun doWork(): Result {
         Log.i(TAG, "BatchEnhanceWorker started")
         
         BatchNotificationHelper.createChannels(applicationContext)
 
-        // サービス継続のための ForegroundInfo 設定
-        setForeground(createForegroundInfo(0, BatchEnhanceQueue.progress.value.total, "準備中"))
+        // 即座にフォアグラウンドにして 10 分制限を回避
+        val initialNotification = BatchNotificationHelper.createProgressNotification(
+            applicationContext, 0, BatchEnhanceQueue.progress.value.total,
+            "準備中...", -1L
+        )
+        setForeground(
+            ForegroundInfo(
+                BatchNotificationHelper.NOTIFICATION_ID_PROGRESS,
+                initialNotification,
+                ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC
+            )
+        )
 
         // RouteCProcessor の初期化
         routeC = RouteCProcessor(applicationContext)
@@ -56,7 +75,7 @@ class BatchEnhanceWorker(
         if (!ready) {
             Log.e(TAG, "RouteCProcessor failed to initialize in Worker")
             BatchEnhanceQueue.abort("エンジンの初期化に失敗しました")
-            return@withContext Result.failure()
+            return Result.failure()
         }
 
         try {
@@ -72,7 +91,7 @@ class BatchEnhanceWorker(
                             BatchEnhanceQueue.progress.value.completed,
                             BatchEnhanceQueue.progress.value.total
                         )
-                        return@withContext Result.retry()
+                        return Result.retry()
                     }
                     thermal >= ThermalLevel.SEVERE -> {
                         Log.i(TAG, "Thermal level SEVERE: Pausing...")
@@ -94,12 +113,12 @@ class BatchEnhanceWorker(
                 
                 // 進捗通知更新
                 val progress = BatchEnhanceQueue.progress.value
-                setForeground(createForegroundInfo(
+                updateProgressNotification(
                     progress.completed + 1, 
                     progress.total, 
                     item.displayName,
                     progress.estimatedRemainingMs
-                ))
+                )
 
                 val startTime = System.currentTimeMillis()
                 
@@ -135,11 +154,11 @@ class BatchEnhanceWorker(
                 final.successCount,
                 final.failed
             )
-            return@withContext Result.success()
+            return Result.success()
 
         } catch (e: Exception) {
             Log.e(TAG, "Batch worker fatal error", e)
-            return@withContext Result.failure()
+            return Result.failure()
         } finally {
             routeC?.release()
         }
@@ -148,8 +167,8 @@ class BatchEnhanceWorker(
     private suspend fun processOneItem(item: BatchEnhanceQueue.BatchItem): Uri? {
         val context = applicationContext
         
-        // 1. デコード（メモリ負荷を考慮し 4096px 制限）
-        val bitmap = RegionDecoder.decodeSafe(context, item.uri, 4096) ?: return null
+        // 1. デコード（バッチ用: 2048px に制限してタイル数を抑制）
+        val bitmap = RegionDecoder.decodeSafe(context, item.uri, BATCH_MAX_DECODE_SIDE) ?: return null
         
         // 2. 超解像処理
         val result = routeC?.process(bitmap)
@@ -168,7 +187,7 @@ class BatchEnhanceWorker(
 
     private fun saveBitmapStreaming(bitmap: Bitmap, prefix: String): Uri? {
         val context = applicationContext
-        val timestamp = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date())
+        val timestamp = SimpleDateFormat("yyyyMMdd_HHmmss_SSS", Locale.US).format(Date())
         val filename = "${prefix}_${timestamp}.jpg"
 
         val contentValues = ContentValues().apply {
@@ -206,14 +225,18 @@ class BatchEnhanceWorker(
         }
     }
 
-    private fun createForegroundInfo(current: Int, total: Int, fileName: String, remainingMs: Long = -1): ForegroundInfo {
+    private suspend fun updateProgressNotification(
+        current: Int, total: Int, fileName: String, estimatedMs: Long
+    ) {
         val notification = BatchNotificationHelper.createProgressNotification(
-            applicationContext, current, total, fileName, remainingMs
+            applicationContext, current, total, fileName, estimatedMs
         )
-        return ForegroundInfo(
-            BatchNotificationHelper.NOTIFICATION_ID_PROGRESS, 
-            notification,
-            ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC
+        setForeground(
+            ForegroundInfo(
+                BatchNotificationHelper.NOTIFICATION_ID_PROGRESS,
+                notification,
+                ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC
+            )
         )
     }
 }
