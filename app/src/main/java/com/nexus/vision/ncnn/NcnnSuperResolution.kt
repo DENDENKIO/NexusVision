@@ -13,8 +13,8 @@ import android.util.Log
 class NcnnSuperResolution {
     companion object {
         private const val TAG = "NcnnSR"
-        private const val PARAM_FILE = "models/realesr-animevideov3-x4.param"
-        private const val MODEL_FILE = "models/realesr-animevideov3-x4.bin"
+        private const val PARAM_FILE = "models/realesr-general-x4v3.param"
+        private const val MODEL_FILE = "models/realesr-general-x4v3.bin"
         private const val SCALE = 4
         private const val TILE_SIZE = 32
 
