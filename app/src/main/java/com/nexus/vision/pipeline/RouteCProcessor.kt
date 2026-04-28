@@ -23,9 +23,6 @@ class RouteCProcessor(private val context: Context) {
 
     companion object {
         private const val TAG = "RouteCProcessor"
-
-        // EASS を有効にする場合は true にする（現在は無効）
-        private const val ENABLE_EASS = false
     }
 
     private var sr: NcnnSuperResolution? = null
@@ -37,7 +34,7 @@ class RouteCProcessor(private val context: Context) {
         sr = NcnnSuperResolution()
         val result = sr?.initialize(context) ?: false
         if (result) {
-            Log.i(TAG, "NcnnSuperResolution initialized (EASS disabled)")
+            Log.i(TAG, "NcnnSuperResolution initialized")
         } else {
             Log.e(TAG, "NcnnSuperResolution init failed")
         }
