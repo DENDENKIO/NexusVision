@@ -125,8 +125,10 @@ class NexusEngineManager private constructor() {
 
             if (modelPath == null) {
                 _state.value = EngineState.Error(
-                    message = "モデルファイルが見つかりません: $MODEL_FILENAME\n" +
-                            "app/docs/SPEC_v4.0.md のモデル配置手順を参照してください。"
+                    message = "モデルファイルが見つかりません。\n" +
+                            "期待名: $MODEL_FILENAME\n" +
+                            "配置先: files/models または app/src/main/assets/models\n" +
+                            "手順: app/docs/SPEC_v4.1.md を参照してください。"
                 )
                 return
             }
@@ -353,8 +355,60 @@ class NexusEngineManager private constructor() {
             return externalModel.absolutePath
         }
 
-        // TODO Phase 2+: assets からコピー or ダウンロード機能
+        // 3) filesDir/models 内の .litertlm を自動検出（ファイル名相違の救済）
+        val filesFallback = findFirstLitertModel(File(context.filesDir, "models"))
+        if (filesFallback != null) {
+            Log.w(TAG, "Fallback model selected in filesDir: $filesFallback")
+            return filesFallback
+        }
+
+        // 4) externalFilesDir/models 内の .litertlm を自動検出
+        val externalFallback = findFirstLitertModel(File(context.getExternalFilesDir(null), "models"))
+        if (externalFallback != null) {
+            Log.w(TAG, "Fallback model selected in externalFilesDir: $externalFallback")
+            return externalFallback
+        }
+
+        // 5) assets/models からコピー（期待名→任意名の順）
+        val copied = copyModelFromAssets(context)
+        if (copied != null) return copied
+
         Log.w(TAG, "Model file not found: $MODEL_FILENAME")
+        return null
+    }
+
+    private fun findFirstLitertModel(dir: File): String? {
+        if (!dir.exists() || !dir.isDirectory) return null
+        return dir.listFiles()
+            ?.firstOrNull { it.isFile && it.extension.equals("litertlm", ignoreCase = true) }
+            ?.absolutePath
+    }
+
+    private fun copyModelFromAssets(context: Context): String? {
+        val targetDir = File(context.filesDir, "models")
+        if (!targetDir.exists() && !targetDir.mkdirs()) return null
+
+        // 期待ファイル名を最優先
+        val candidates = mutableListOf(MODEL_FILENAME)
+        runCatching {
+            context.assets.list("models")
+                ?.filter { it.endsWith(".litertlm", ignoreCase = true) }
+                ?.forEach { if (it != MODEL_FILENAME) candidates.add(it) }
+        }
+
+        for (name in candidates) {
+            val outFile = File(targetDir, name)
+            val copied = runCatching {
+                context.assets.open("models/$name").use { input ->
+                    outFile.outputStream().use { output -> input.copyTo(output) }
+                }
+                outFile.absolutePath
+            }.getOrNull()
+            if (copied != null) {
+                Log.i(TAG, "Model copied from assets: $copied")
+                return copied
+            }
+        }
         return null
     }
 
