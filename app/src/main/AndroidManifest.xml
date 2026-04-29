@@ -132,6 +132,19 @@
             android:name="com.google.mlkit.vision.DEPENDENCIES"
             android:value="ocr_ja" />
 
+        <provider
+            android:name=".sdk.NexusContentProvider"
+            android:authorities="com.nexus.vision.provider"
+            android:exported="true" />
+
+        <receiver
+            android:name=".sdk.IntentApiReceiver"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="com.nexus.vision.api.ANALYZE" />
+            </intent-filter>
+        </receiver>
+
     </application>
 
 </manifest>
