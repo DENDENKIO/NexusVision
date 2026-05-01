@@ -50,29 +50,9 @@ class SafmnSuperResolution {
             Log.e(TAG, "SAFMN++ not loaded")
             return null
         }
-        
-        val maxSide = maxOf(bitmap.width, bitmap.height)
-        val targetBitmap = if (maxSide > 1024) {
-            Log.i(TAG, "Input too large ($maxSide), downscaling to 1024 first")
-            limitSize(bitmap, 1024)
-        } else {
-            bitmap
-        }
-
-        val targetMaxSide = maxOf(targetBitmap.width, targetBitmap.height)
-        val result = if (targetMaxSide <= SR_MAX_INPUT) {
-            Log.i(TAG, "Small (${targetBitmap.width}x${targetBitmap.height}): direct 4x")
-            processDirect(targetBitmap)
-        } else {
-            Log.i(TAG, "Large (${targetBitmap.width}x${targetBitmap.height}): tiled")
-            processTiled(targetBitmap)
-        }
-
-        if (targetBitmap !== bitmap) {
-            targetBitmap.recycle()
-        }
-
-        return result
+        // テスト: 常に direct パスを使用
+        Log.i(TAG, "Direct test (${bitmap.width}x${bitmap.height})")
+        return processDirect(bitmap)
     }
 
     private fun processDirect(bitmap: Bitmap): Bitmap? {
