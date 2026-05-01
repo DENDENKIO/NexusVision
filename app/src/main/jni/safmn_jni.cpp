@@ -21,7 +21,7 @@
 
 static ncnn::Net* g_safmn_net = nullptr;
 static int g_safmn_scale = 4;
-static int g_safmn_tileSize = 64;
+static int g_safmn_tileSize = 128;
 static int g_safmn_prepadding = 10;
 static bool g_safmn_useGpu = false;
 

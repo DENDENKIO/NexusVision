@@ -21,9 +21,9 @@ class SafmnSuperResolution {
         // SAFMN は軽量なので Real-ESRGAN より大きめタイルが可能
         private const val TILE_SIZE = 64
 
-        private const val SR_MAX_INPUT = 128
-        private const val PROCESS_TILE = 128
-        private const val PROCESS_OVERLAP = 16
+        private const val SR_MAX_INPUT = 256
+        private const val PROCESS_TILE = 256
+        private const val PROCESS_OVERLAP = 8
         private const val MAX_OUTPUT_SIDE = 4096
     }
 
@@ -50,14 +50,29 @@ class SafmnSuperResolution {
             Log.e(TAG, "SAFMN++ not loaded")
             return null
         }
+        
         val maxSide = maxOf(bitmap.width, bitmap.height)
-        return if (maxSide <= SR_MAX_INPUT) {
-            Log.i(TAG, "Small (${bitmap.width}x${bitmap.height}): direct 4x")
-            processDirect(bitmap)
+        val targetBitmap = if (maxSide > 1024) {
+            Log.i(TAG, "Input too large ($maxSide), downscaling to 1024 first")
+            limitSize(bitmap, 1024)
         } else {
-            Log.i(TAG, "Large (${bitmap.width}x${bitmap.height}): tiled")
-            processTiled(bitmap)
+            bitmap
         }
+
+        val targetMaxSide = maxOf(targetBitmap.width, targetBitmap.height)
+        val result = if (targetMaxSide <= SR_MAX_INPUT) {
+            Log.i(TAG, "Small (${targetBitmap.width}x${targetBitmap.height}): direct 4x")
+            processDirect(targetBitmap)
+        } else {
+            Log.i(TAG, "Large (${targetBitmap.width}x${targetBitmap.height}): tiled")
+            processTiled(targetBitmap)
+        }
+
+        if (targetBitmap !== bitmap) {
+            targetBitmap.recycle()
+        }
+
+        return result
     }
 
     private fun processDirect(bitmap: Bitmap): Bitmap? {
