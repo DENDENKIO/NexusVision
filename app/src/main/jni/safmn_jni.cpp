@@ -206,9 +206,9 @@ Java_com_nexus_vision_ncnn_SafmnBridge_nativeSafmnProcess(
                 ex.set_staging_vkallocator(g_safmn_net->opt.staging_vkallocator);
             }
 
-            ex.input("input", in);
+            ex.input("in0", in);
             ncnn::Mat out;
-            int ret = ex.extract("output", out);
+            int ret = ex.extract("out0", out);
 
             if (ret != 0) {
                 LOGE_S("Tile (%d,%d) failed: %d", xi, yi, ret);
