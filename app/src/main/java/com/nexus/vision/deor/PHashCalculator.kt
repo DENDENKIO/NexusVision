@@ -39,10 +39,13 @@ object PHashCalculator {
         // 1. 32×32 にリサイズ
         val resized = Bitmap.createScaledBitmap(bitmap, RESIZE, RESIZE, true)
 
-        // 2. グレースケール行列を構築
+        // 2. グレースケール行列を構築（★ getPixel ループ → getPixels 一括取得）
+        val pixels = IntArray(RESIZE * RESIZE)
+        resized.getPixels(pixels, 0, RESIZE, 0, 0, RESIZE, RESIZE)
+
         val gray = Array(RESIZE) { y ->
             DoubleArray(RESIZE) { x ->
-                val pixel = resized.getPixel(x, y)
+                val pixel = pixels[y * RESIZE + x]
                 0.299 * Color.red(pixel) + 0.587 * Color.green(pixel) + 0.114 * Color.blue(pixel)
             }
         }

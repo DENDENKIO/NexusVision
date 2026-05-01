@@ -1,6 +1,7 @@
 <!-- ファイルパス: app/src/main/res/values/strings.xml -->
 <resources>
     <string name="app_name">NEXUS Vision</string>
+    <string name="widget_description">バッチ高画質化の進捗を表示します</string>
     <string name="shortcut_ask_label">NEXUS に質問</string>
     <string name="shortcut_ask_long_label">NEXUS Vision に質問する</string>
     <string name="share_label">NEXUS Vision で処理</string>

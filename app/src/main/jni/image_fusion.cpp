@@ -1,5 +1,6 @@
 // ファイルパス: app/src/main/jni/image_fusion.cpp
 #include "image_fusion.h"
+#include "neon_dwt.h"
 #include <vector>
 #include <cstring>
 #include <cmath>
@@ -215,139 +216,14 @@ int dwtFusion(const uint8_t* img1, const uint8_t* img2,
               int w, int h, uint8_t* output) {
     if (!img1 || !img2 || !output || w < 2 || h < 2) return -1;
     auto t0 = std::chrono::steady_clock::now();
-    FLOGI("DWT Fusion start: %dx%d", w, h);
+    FLOGI("DWT Fusion (NEON Lifting) start: %dx%d", w, h);
 
-    // 偶数に揃える
-    int ew = w & ~1;
-    int eh = h & ~1;
-    int hw = ew / 2;
-    int hh = eh / 2;
-
-    // Alphaコピー (img1から)
-    size_t fullSz = (size_t)w * h;
-    for (size_t i = 0; i < fullSz; i++) {
-        output[i * 4 + 3] = img1[i * 4 + 3];
-    }
-
-    // チャンネルごとに処理
-    for (int ch = 0; ch < 3; ch++) {
-        // float変換
-        std::vector<float> f1((size_t)ew * eh), f2((size_t)ew * eh);
-        for (int y = 0; y < eh; y++) {
-            for (int x = 0; x < ew; x++) {
-                f1[y * ew + x] = (float)img1[(y * w + x) * 4 + ch];
-                f2[y * ew + x] = (float)img2[(y * w + x) * 4 + ch];
-            }
-        }
-
-        // ── Forward DWT (2D Haar, 1レベル) ──
-        // 行方向
-        size_t tempSz = (size_t)ew * eh;
-        std::vector<float> tmp1(tempSz), tmp2(tempSz);
-        for (int y = 0; y < eh; y++) {
-            for (int x = 0; x < hw; x++) {
-                float a1 = f1[y * ew + 2 * x];
-                float b1 = f1[y * ew + 2 * x + 1];
-                tmp1[y * ew + x]      = (a1 + b1) * 0.5f; // L
-                tmp1[y * ew + hw + x] = (a1 - b1) * 0.5f; // H
-
-                float a2 = f2[y * ew + 2 * x];
-                float b2 = f2[y * ew + 2 * x + 1];
-                tmp2[y * ew + x]      = (a2 + b2) * 0.5f;
-                tmp2[y * ew + hw + x] = (a2 - b2) * 0.5f;
-            }
-        }
-        // 列方向
-        std::vector<float> dwt1(tempSz), dwt2(tempSz);
-        for (int x = 0; x < ew; x++) {
-            for (int y = 0; y < hh; y++) {
-                float a1 = tmp1[(2 * y) * ew + x];
-                float b1 = tmp1[(2 * y + 1) * ew + x];
-                dwt1[y * ew + x]        = (a1 + b1) * 0.5f; // LL
-                dwt1[(hh + y) * ew + x] = (a1 - b1) * 0.5f; // LH/HL
-
-                float a2 = tmp2[(2 * y) * ew + x];
-                float b2 = tmp2[(2 * y + 1) * ew + x];
-                dwt2[y * ew + x]        = (a2 + b2) * 0.5f;
-                dwt2[(hh + y) * ew + x] = (a2 - b2) * 0.5f;
-            }
-        }
-        tmp1.clear(); tmp1.shrink_to_fit();
-        tmp2.clear(); tmp2.shrink_to_fit();
-
-        // ── Fusion ──
-        // サブバンド配置: LL=[0,0]-[hw,hh], LH=[hw,0]-[ew,hh],
-        //                 HL=[0,hh]-[hw,eh], HH=[hw,hh]-[ew,eh]
-        std::vector<float> fused(tempSz);
-        for (int y = 0; y < eh; y++) {
-            for (int x = 0; x < ew; x++) {
-                bool isTop = y < hh;
-                bool isLeft = x < hw;
-                float v1 = dwt1[y * ew + x];
-                float v2 = dwt2[y * ew + x];
-                if (isTop && isLeft) {
-                    // LL: AI結果のLLを採用 (クリーンな構造)
-                    fused[y * ew + x] = v2;
-                } else if (!isTop && !isLeft) {
-                    // HH: AI結果のHHを採用 (ノイズ排除)
-                    fused[y * ew + x] = v2;
-                } else {
-                    // LH, HL: 振幅が大きい方を採用 (強いエッジ優先)
-                    fused[y * ew + x] = (fabsf(v1) >= fabsf(v2)) ? v1 : v2;
-                }
-            }
-        }
-        dwt1.clear(); dwt1.shrink_to_fit();
-        dwt2.clear(); dwt2.shrink_to_fit();
-
-        // ── Inverse DWT ──
-        // 列方向逆
-        std::vector<float> itmp(tempSz);
-        for (int x = 0; x < ew; x++) {
-            for (int y = 0; y < hh; y++) {
-                float ll = fused[y * ew + x];
-                float lh = fused[(hh + y) * ew + x];
-                itmp[(2 * y) * ew + x]     = ll + lh;
-                itmp[(2 * y + 1) * ew + x] = ll - lh;
-            }
-        }
-        fused.clear(); fused.shrink_to_fit();
-
-        // 行方向逆
-        std::vector<float> result(tempSz);
-        for (int y = 0; y < eh; y++) {
-            for (int x = 0; x < hw; x++) {
-                float l = itmp[y * ew + x];
-                float hv = itmp[y * ew + hw + x];
-                result[y * ew + 2 * x]     = l + hv;
-                result[y * ew + 2 * x + 1] = l - hv;
-            }
-        }
-        itmp.clear(); itmp.shrink_to_fit();
-
-        // 出力 (クランプ)
-        for (int y = 0; y < eh; y++) {
-            for (int x = 0; x < ew; x++) {
-                float v = result[y * ew + x];
-                output[(y * w + x) * 4 + ch] = (uint8_t)std::min(255.0f, std::max(0.0f, v + 0.5f));
-            }
-        }
-
-        // 奇数端の処理 (最後の列/行はimg1からコピー)
-        if (ew < w) {
-            for (int y = 0; y < h; y++)
-                output[(y * w + w - 1) * 4 + ch] = img1[(y * w + w - 1) * 4 + ch];
-        }
-        if (eh < h) {
-            for (int x = 0; x < w; x++)
-                output[((h - 1) * w + x) * 4 + ch] = img1[((h - 1) * w + x) * 4 + ch];
-        }
-    }
+    int ret = NeonDWT::fused_dwt_pipeline(img1, img2, w, h, output);
 
     auto t1 = std::chrono::steady_clock::now();
     int ms = (int)std::chrono::duration_cast<std::chrono::milliseconds>(t1 - t0).count();
-    FLOGI("DWT Fusion done: %dms", ms);
-    return 0;
+    FLOGI("DWT Fusion (NEON Lifting) done: %dms", ms);
+    return ret;
 }
 
 // ════════════════════════════════════════════

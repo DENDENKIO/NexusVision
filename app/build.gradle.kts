@@ -83,6 +83,12 @@ dependencies {
     implementation("androidx.activity:activity-compose:1.10.1")
     implementation("androidx.lifecycle:lifecycle-viewmodel-compose:2.9.0")
 
+    // NCNN
+    implementation(fileTree(mapOf("dir" to "libs", "include" to listOf("*.jar"))))
+    
+    // Jetpack Glance (Widget)
+    implementation("androidx.glance:glance-appwidget:1.1.1")
+
     // Core
     implementation("androidx.core:core-ktx:1.16.0")
     implementation("androidx.lifecycle:lifecycle-runtime-ktx:2.9.0")
@@ -99,8 +105,9 @@ dependencies {
     implementation("com.google.mlkit:text-recognition:16.0.1")
     implementation("com.google.mlkit:text-recognition-japanese:16.0.1")
 
-    // LiteRT-LM (Gemma) — 後のPhaseで必要になったら戻す
-    // implementation("com.google.ai.edge.litert-lm:litert-lm-android:0.10.2")
+    // LiteRT-LM (Gemma-4-E2B) — Phase 9: AI エンジン有効化
+    implementation("com.google.ai.edge.litertlm:litertlm-android:0.10.2")
+    implementation("androidx.lifecycle:lifecycle-process:2.9.0")
 
     // ObjectBox
     implementation("io.objectbox:objectbox-android:5.3.0")

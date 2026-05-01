@@ -3,6 +3,9 @@ package com.nexus.vision
 
 import android.app.Application
 import android.util.Log
+import androidx.lifecycle.DefaultLifecycleObserver
+import androidx.lifecycle.LifecycleOwner
+import androidx.lifecycle.ProcessLifecycleOwner
 import com.nexus.vision.cache.L1PHashCache
 import com.nexus.vision.cache.L2InferenceCache
 import com.nexus.vision.MyObjectBox
@@ -10,20 +13,9 @@ import com.nexus.vision.engine.NexusEngineManager
 import com.nexus.vision.engine.ThermalMonitor
 import com.nexus.vision.sheets.NexusSheetsIndex
 import com.nexus.vision.sheets.SheetsQueryEngine
+import com.nexus.vision.memory.LongTermMemory
 import io.objectbox.BoxStore
 
-/**
- * NEXUS Vision アプリケーションクラス
- *
- * 責務:
- *   - ThermalMonitor 初期化        (Phase 2)
- *   - NexusEngineManager 初期化    (Phase 2)
- *   - ObjectBox 初期化             (Phase 3)
- *   - L1/L2 キャッシュ初期化        (Phase 3)
- *   - NexusSheetsIndex 初期化      (Phase 8.5)
- *   - SheetsQueryEngine 初期化     (Phase 8.5)
- *   - グローバル例外ハンドラ
- */
 class NexusApplication : Application() {
 
     companion object {
@@ -45,10 +37,11 @@ class NexusApplication : Application() {
     lateinit var l2Cache: L2InferenceCache
         private set
 
-    // Phase 8.5 追加
     lateinit var sheetsIndex: NexusSheetsIndex
         private set
     lateinit var sheetsQueryEngine: SheetsQueryEngine
+        private set
+    lateinit var longTermMemory: LongTermMemory
         private set
 
     override fun onCreate() {
@@ -84,8 +77,22 @@ class NexusApplication : Application() {
         sheetsIndex = NexusSheetsIndex(boxStore)
         sheetsQueryEngine = SheetsQueryEngine(sheetsIndex)
         Log.i(TAG, "NexusSheets initialized — ${sheetsIndex.fileCount()} files, ${sheetsIndex.totalRowCount()} rows")
+
+        // Phase 11: Long-Term Memory
+        longTermMemory = LongTermMemory(boxStore)
+        Log.i(TAG, "Phase 11: LongTermMemory initialized — ${longTermMemory.entryCount()} entries")
+
+        // I: ProcessLifecycleOwner で確実にリソース解放（onTerminate は実機で呼ばれない）
+        ProcessLifecycleOwner.get().lifecycle.addObserver(object : DefaultLifecycleObserver {
+            override fun onDestroy(owner: LifecycleOwner) {
+                Log.i(TAG, "ProcessLifecycleOwner onDestroy — releasing resources")
+                NexusEngineManager.getInstance().release()
+                boxStore.close()
+            }
+        })
     }
 
+    // I: onTerminate は非推奨（実機では呼ばれない）— バックアップとして残す
     override fun onTerminate() {
         super.onTerminate()
         NexusEngineManager.getInstance().release()

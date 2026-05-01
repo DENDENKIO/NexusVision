@@ -217,9 +217,8 @@ class ProcessTextActivity : ComponentActivity() {
             }
 
             val result = engine.inferText(prompt)
-            result.getOrElse {
-                "エンジンエラー: ${it.message}\n\n" +
-                        basicAnalysis(text)
+            result.getOrElse { 
+                "エンジンエラー: ${it.message}\n\n" + basicAnalysis(text)
             }
         } else {
             basicAnalysis(text) + "\n\n" +

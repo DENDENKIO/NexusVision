@@ -3,7 +3,9 @@
 package com.nexus.vision.ui.components
 
 import android.net.Uri
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -17,9 +19,15 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -42,7 +50,9 @@ data class ChatMessage(
     val imagePath: String? = null,
     val timestamp: Long = System.currentTimeMillis(),
     val isProcessing: Boolean = false,
-    val processingLabel: String = ""
+    val processingLabel: String = "",
+    /** 引用しているメッセージの番号リスト (1始まり) */
+    val quotedIndices: List<Int> = emptyList()
 ) {
     enum class Role { USER, ASSISTANT, SYSTEM }
 }
@@ -52,10 +62,18 @@ data class ChatMessage(
  *
  * Phase 4: 基本実装
  * Phase 5: 画像プレビューに OCR 結果オーバーレイ追加
+ * Phase 11: 長押し引用・コピー対応
  */
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 fun ChatBubble(
     message: ChatMessage,
+    /** このメッセージの表示番号 (1始まり) */
+    messageNumber: Int = 0,
+    /** 長押し → 引用タグを入力に挿入 */
+    onQuote: ((quoteTag: String) -> Unit)? = null,
+    /** 長押し → テキストをコピー */
+    onCopy: ((text: String) -> Unit)? = null,
     modifier: Modifier = Modifier
 ) {
     val isUser = message.role == ChatMessage.Role.USER
@@ -79,82 +97,136 @@ fun ChatBubble(
         else -> MaterialTheme.colorScheme.onSurfaceVariant
     }
 
+    // 長押しメニューの表示状態
+    var showMenu by remember { mutableStateOf(false) }
+
     Row(
         modifier = modifier
             .fillMaxWidth()
             .padding(horizontal = 8.dp, vertical = 4.dp),
         horizontalArrangement = arrangement
     ) {
-        Column(
-            modifier = Modifier
-                .widthIn(max = maxWidth)
-                .clip(
-                    RoundedCornerShape(
-                        topStart = 16.dp,
-                        topEnd = 16.dp,
-                        bottomStart = if (isUser) 16.dp else 4.dp,
-                        bottomEnd = if (isUser) 4.dp else 16.dp
+        Box {
+            Column(
+                modifier = Modifier
+                    .widthIn(max = maxWidth)
+                    .clip(
+                        RoundedCornerShape(
+                            topStart = 16.dp,
+                            topEnd = 16.dp,
+                            bottomStart = if (isUser) 16.dp else 4.dp,
+                            bottomEnd = if (isUser) 4.dp else 16.dp
+                        )
                     )
-                )
-                .background(bubbleColor)
-                .padding(12.dp)
-        ) {
-            // ロールラベル
-            if (!isUser) {
-                Text(
-                    text = if (isSystem) "System" else "NEXUS Vision",
-                    style = MaterialTheme.typography.labelSmall,
-                    fontWeight = FontWeight.Bold,
-                    color = textColor.copy(alpha = 0.7f)
-                )
-                Spacer(modifier = Modifier.height(4.dp))
-            }
-
-            // 画像プレビュー（あれば）
-            if (message.imagePath != null) {
-                AsyncImage(
-                    model = Uri.parse(message.imagePath),
-                    contentDescription = "添付画像",
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .height(180.dp)
-                        .clip(RoundedCornerShape(8.dp)),
-                    contentScale = ContentScale.Crop
-                )
-                Spacer(modifier = Modifier.height(8.dp))
-            }
-
-            // 処理中インジケータ
-            if (message.isProcessing) {
+                    .background(bubbleColor)
+                    .combinedClickable(
+                        onClick = { /* 通常タップ: 何もしない */ },
+                        onLongClick = {
+                            if (!message.isProcessing && message.text.isNotBlank()) {
+                                showMenu = true
+                            }
+                        }
+                    )
+                    .padding(12.dp)
+            ) {
+                // メッセージ番号バッジ + ロールラベル
                 Row(verticalAlignment = Alignment.CenterVertically) {
-                    CircularProgressIndicator(
-                        modifier = Modifier.size(16.dp),
-                        strokeWidth = 2.dp,
-                        color = textColor
+                    if (messageNumber > 0) {
+                        Text(
+                            text = "#$messageNumber",
+                            style = MaterialTheme.typography.labelSmall,
+                            fontWeight = FontWeight.Bold,
+                            color = textColor.copy(alpha = 0.4f)
+                        )
+                        Spacer(modifier = Modifier.width(6.dp))
+                    }
+                    if (!isUser) {
+                        Text(
+                            text = if (isSystem) "System" else "NEXUS Vision",
+                            style = MaterialTheme.typography.labelSmall,
+                            fontWeight = FontWeight.Bold,
+                            color = textColor.copy(alpha = 0.7f)
+                        )
+                    }
+                }
+                if (messageNumber > 0 || !isUser) {
+                    Spacer(modifier = Modifier.height(4.dp))
+                }
+
+                // 画像プレビュー（あれば）
+                if (message.imagePath != null) {
+                    AsyncImage(
+                        model = Uri.parse(message.imagePath),
+                        contentDescription = "添付画像",
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(180.dp)
+                            .clip(RoundedCornerShape(8.dp)),
+                        contentScale = ContentScale.Crop
                     )
-                    Spacer(modifier = Modifier.width(8.dp))
+                    Spacer(modifier = Modifier.height(8.dp))
+                }
+
+                // 処理中インジケータ
+                if (message.isProcessing) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        CircularProgressIndicator(
+                            modifier = Modifier.size(16.dp),
+                            strokeWidth = 2.dp,
+                            color = textColor
+                        )
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text(
+                            text = message.processingLabel.ifEmpty { "処理中..." },
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = textColor
+                        )
+                    }
+                } else {
+                    // テキスト本文
                     Text(
-                        text = message.processingLabel.ifEmpty { "処理中..." },
+                        text = message.text,
                         style = MaterialTheme.typography.bodyMedium,
                         color = textColor
                     )
                 }
-            } else {
-                // テキスト本文
+
+                // タイムスタンプ
+                Spacer(modifier = Modifier.height(4.dp))
                 Text(
-                    text = message.text,
-                    style = MaterialTheme.typography.bodyMedium,
-                    color = textColor
+                    text = formatTimestamp(message.timestamp),
+                    style = MaterialTheme.typography.labelSmall,
+                    color = textColor.copy(alpha = 0.5f)
                 )
             }
 
-            // タイムスタンプ
-            Spacer(modifier = Modifier.height(4.dp))
-            Text(
-                text = formatTimestamp(message.timestamp),
-                style = MaterialTheme.typography.labelSmall,
-                color = textColor.copy(alpha = 0.5f)
-            )
+            // ── 長押しコンテキストメニュー ──
+            DropdownMenu(
+                expanded = showMenu,
+                onDismissRequest = { showMenu = false }
+            ) {
+                // 引用ボタン
+                if (messageNumber > 0 && onQuote != null) {
+                    val timeStr = formatTimestamp(message.timestamp)
+                    DropdownMenuItem(
+                        text = { Text("引用 @$messageNumber-$timeStr") },
+                        onClick = {
+                            showMenu = false
+                            onQuote("@$messageNumber-$timeStr ")
+                        }
+                    )
+                }
+                // コピーボタン
+                if (onCopy != null && message.text.isNotBlank()) {
+                    DropdownMenuItem(
+                        text = { Text("テキストをコピー") },
+                        onClick = {
+                            showMenu = false
+                            onCopy(message.text)
+                        }
+                    )
+                }
+            }
         }
     }
 }

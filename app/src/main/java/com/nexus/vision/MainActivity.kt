@@ -19,6 +19,9 @@ import com.nexus.vision.os.ShareReceiver
 import com.nexus.vision.ui.MainScreen
 import com.nexus.vision.ui.MainViewModel
 import com.nexus.vision.ui.theme.NexusVisionTheme
+import com.nexus.vision.engine.EngineState
+import com.nexus.vision.engine.NexusEngineManager
+import com.nexus.vision.notification.InlineReplyHandler
 
 class MainActivity : ComponentActivity() {
 
@@ -98,6 +101,26 @@ class MainActivity : ComponentActivity() {
                 )
             }
         }
+    }
+
+    override fun onStop() {
+        super.onStop()
+        // エンジンがReady/Degradedの場合のみ、通知からの質問を有効にする
+        val engineState = NexusEngineManager.getInstance().state.value
+        if (engineState is EngineState.Ready || engineState is EngineState.Degraded) {
+            InlineReplyHandler.showReplyNotification(
+                this,
+                "NEXUS Vision — 通知から質問できます"
+            )
+            Log.d(TAG, "Inline reply notification shown (engine=$engineState)")
+        }
+    }
+
+    override fun onStart() {
+        super.onStart()
+        // アプリに戻ったら通知を消す（チャットUIで直接操作するため）
+        val nm = getSystemService(NOTIFICATION_SERVICE) as android.app.NotificationManager
+        nm.cancel(InlineReplyHandler.NOTIFICATION_ID)
     }
 
     override fun onNewIntent(intent: Intent) {

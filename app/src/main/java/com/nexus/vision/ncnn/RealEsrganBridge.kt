@@ -45,4 +45,15 @@ object RealEsrganBridge {
     external fun nativeJpegBeginWrite(fd: Int, width: Int, height: Int, quality: Int): Long
     external fun nativeJpegWriteRows(ctxPtr: Long, bitmap: Bitmap, startRow: Int, numRows: Int): Int
     external fun nativeJpegEndWrite(ctxPtr: Long): Int
+    
+    // NEON SIMD 最適化機能
+    external fun nativeShannonEntropy(inputBitmap: Bitmap): Float
+    external fun nativeBuildHistogram(inputBitmap: Bitmap): IntArray
+    external fun nativeISauvolaBinarize(
+        inputBitmap: Bitmap,
+        windowSize: Int,
+        k: Float,
+        r: Float,
+        contrastThreshold: Float
+    ): Bitmap?
 }

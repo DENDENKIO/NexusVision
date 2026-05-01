@@ -18,6 +18,7 @@ import com.nexus.vision.engine.ThermalLevel
 import com.nexus.vision.image.RegionDecoder
 import com.nexus.vision.ncnn.RealEsrganBridge
 import com.nexus.vision.notification.BatchNotificationHelper
+import com.nexus.vision.widget.ProgressWidget
 import com.nexus.vision.pipeline.RouteCProcessor
 import kotlinx.coroutines.delay
 import java.text.SimpleDateFormat
@@ -69,6 +70,11 @@ class BatchEnhanceWorker(
             )
         )
 
+        // Widget 初期更新
+        ProgressWidget.updateProgress(
+            applicationContext, 0f, "準備中...", true
+        )
+
         // RouteCProcessor の初期化
         routeC = RouteCProcessor(applicationContext)
         val ready = routeC?.initialize() ?: false
@@ -104,6 +110,12 @@ class BatchEnhanceWorker(
                         if (BatchEnhanceQueue.progress.value.isPaused) {
                             Log.i(TAG, "Thermal recovered: Resuming")
                             BatchEnhanceQueue.resume()
+                            ProgressWidget.updateProgress(
+                                applicationContext,
+                                BatchEnhanceQueue.progress.value.completed.toFloat() / BatchEnhanceQueue.progress.value.total,
+                                "再開しました",
+                                true
+                            )
                         }
                     }
                 }
@@ -134,8 +146,20 @@ class BatchEnhanceWorker(
                             progress.total,
                             item.displayName
                         )
+                        ProgressWidget.updateProgress(
+                            applicationContext,
+                            (progress.completed + 1).toFloat() / progress.total,
+                            "${item.displayName} 完了",
+                            true
+                        )
                     } else {
                         BatchEnhanceQueue.markFailed(item, "処理エラー", timeMs)
+                        ProgressWidget.updateProgress(
+                            applicationContext,
+                            (progress.completed + 1).toFloat() / progress.total,
+                            "${item.displayName} 失敗",
+                            true
+                        )
                     }
                 } catch (e: Exception) {
                     Log.e(TAG, "Error processing item: ${item.displayName}", e)
@@ -153,6 +177,9 @@ class BatchEnhanceWorker(
                 final.total,
                 final.successCount,
                 final.failed
+            )
+            ProgressWidget.updateProgress(
+                applicationContext, 1.0f, "バッチ完了 (${final.successCount}成功)", false
             )
             return Result.success()
 

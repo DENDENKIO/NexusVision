@@ -7,6 +7,9 @@ import android.service.quicksettings.Tile
 import android.service.quicksettings.TileService
 import android.util.Log
 import com.nexus.vision.NexusApplication
+import com.nexus.vision.notification.InlineReplyHandler
+import com.nexus.vision.engine.EngineState
+import com.nexus.vision.engine.NexusEngineManager
 
 /**
  * クイック設定タイル「NEXUS Vision」
@@ -61,7 +64,17 @@ class QuickSettingsTile : TileService() {
         if (isHudActive) {
             stopHud()
         } else {
+            // HUD を起動 + 通知からの質問も有効にする
             startHud()
+
+            // エンジンがReady なら通知インライン応答も出す
+            val engineState = NexusEngineManager.getInstance().state.value
+            if (engineState is EngineState.Ready || engineState is EngineState.Degraded) {
+                InlineReplyHandler.showReplyNotification(
+                    applicationContext,
+                    "NEXUS Vision HUD 起動中 — 通知からも質問できます"
+                )
+            }
         }
 
         updateTileState()
@@ -97,6 +110,11 @@ class QuickSettingsTile : TileService() {
             }
             startService(intent)
             isHudActive = false
+
+            // 通知も消す
+            val nm = getSystemService(NOTIFICATION_SERVICE) as android.app.NotificationManager
+            nm.cancel(InlineReplyHandler.NOTIFICATION_ID)
+
             Log.i(TAG, "HUD stopped")
         } catch (e: Exception) {
             Log.e(TAG, "Failed to stop HUD: ${e.message}")

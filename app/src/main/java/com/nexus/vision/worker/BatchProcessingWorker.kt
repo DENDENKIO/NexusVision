@@ -152,10 +152,12 @@ class BatchProcessingWorker(
             else -> "この画像を分析してください。"
         }
 
-        val result = engineManager.inferImage(tempFile.absolutePath, prompt)
-        tempFile.delete()
-
-        val response = result.getOrThrow()
+        val response = try {
+            val result = NexusEngineManager.getInstance().inferImage(tempFile.absolutePath, prompt)
+            result.getOrElse { throw it }
+        } finally {
+            tempFile.delete()
+        }
 
         // L1 キャッシュ保存
         l1Cache.put(

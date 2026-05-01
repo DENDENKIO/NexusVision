@@ -130,9 +130,7 @@ class AppActionsHandler : ComponentActivity() {
 
         if (engine.state.value is EngineState.Ready) {
             val result = engine.inferText(query)
-            result.getOrElse {
-                "エンジンエラー: ${it.message}"
-            }
+            result.getOrElse { "エンジンエラー: ${it.message}" }
         } else {
             "エンジンが未ロードです。NEXUS Vision アプリを開いてエンジンをロードしてください。"
         }

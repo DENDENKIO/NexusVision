@@ -11,6 +11,8 @@
 #include "image_fusion.h"
 #include "gpu.h"
 #include "streaming_jpeg.h"
+#include "neon_entropy.h"
+#include "neon_isauvola.h"
 
 #define TAG "RealESRGAN_JNI"
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO, TAG, __VA_ARGS__)
@@ -554,6 +556,85 @@ Java_com_nexus_vision_ncnn_RealEsrganBridge_nativeJpegEndWrite(
     StreamingJpegCtx* ctx = (StreamingJpegCtx*)ctxPtr;
     if (!ctx) return -1;
     return streamingJpegEnd(ctx);
+}
+
+JNIEXPORT jfloat JNICALL
+Java_com_nexus_vision_ncnn_RealEsrganBridge_nativeShannonEntropy(
+    JNIEnv* env, jclass clazz, jobject inputBitmap) {
+    
+    AndroidBitmapInfo info;
+    if (AndroidBitmap_getInfo(env, inputBitmap, &info) != 0) return -1.0f;
+    if (info.format != ANDROID_BITMAP_FORMAT_RGBA_8888) return -1.0f;
+    
+    void* pixels = nullptr;
+    if (AndroidBitmap_lockPixels(env, inputBitmap, &pixels) != 0) return -1.0f;
+    
+    float entropy = neon_shannon_entropy(
+        (const uint8_t*)pixels, info.width, info.height, info.stride);
+    
+    AndroidBitmap_unlockPixels(env, inputBitmap);
+    return (jfloat)entropy;
+}
+
+JNIEXPORT jintArray JNICALL
+Java_com_nexus_vision_ncnn_RealEsrganBridge_nativeBuildHistogram(
+    JNIEnv* env, jclass clazz, jobject inputBitmap) {
+    
+    AndroidBitmapInfo info;
+    if (AndroidBitmap_getInfo(env, inputBitmap, &info) != 0) return nullptr;
+    if (info.format != ANDROID_BITMAP_FORMAT_RGBA_8888) return nullptr;
+    
+    void* pixels = nullptr;
+    if (AndroidBitmap_lockPixels(env, inputBitmap, &pixels) != 0) return nullptr;
+    
+    uint32_t histogram[256];
+    neon_build_histogram((const uint8_t*)pixels, info.width, info.height, info.stride, histogram);
+    
+    AndroidBitmap_unlockPixels(env, inputBitmap);
+    
+    jintArray result = env->NewIntArray(256);
+    env->SetIntArrayRegion(result, 0, 256, (const jint*)histogram);
+    return result;
+}
+
+JNIEXPORT jobject JNICALL
+Java_com_nexus_vision_ncnn_RealEsrganBridge_nativeISauvolaBinarize(
+    JNIEnv* env, jclass clazz, jobject inputBitmap, 
+    jint windowSize, jfloat k, jfloat r, jfloat contrastThreshold) {
+    
+    AndroidBitmapInfo info;
+    if (AndroidBitmap_getInfo(env, inputBitmap, &info) != 0) return nullptr;
+    if (info.format != ANDROID_BITMAP_FORMAT_RGBA_8888) return nullptr;
+    
+    void* inPixels = nullptr;
+    if (AndroidBitmap_lockPixels(env, inputBitmap, &inPixels) != 0) return nullptr;
+    
+    // Create output bitmap
+    jclass bitmapClass = env->FindClass("android/graphics/Bitmap");
+    jclass configClass = env->FindClass("android/graphics/Bitmap$Config");
+    jfieldID argb8888Field = env->GetStaticFieldID(configClass, "ARGB_8888", "Landroid/graphics/Bitmap$Config;");
+    jobject argb8888 = env->GetStaticObjectField(configClass, argb8888Field);
+    jmethodID createMethod = env->GetStaticMethodID(bitmapClass, "createBitmap", "(IILandroid/graphics/Bitmap$Config;)Landroid/graphics/Bitmap;");
+    jobject outBitmap = env->CallStaticObjectMethod(bitmapClass, createMethod, (int)info.width, (int)info.height, argb8888);
+    
+    if (!outBitmap) {
+        AndroidBitmap_unlockPixels(env, inputBitmap);
+        return nullptr;
+    }
+    
+    void* outPixels = nullptr;
+    if (AndroidBitmap_lockPixels(env, outBitmap, &outPixels) != 0) {
+        AndroidBitmap_unlockPixels(env, inputBitmap);
+        return nullptr;
+    }
+    
+    neon_isauvola_binarize((const uint8_t*)inPixels, info.width, info.height, info.stride, 
+                           (uint8_t*)outPixels, windowSize, k, r, contrastThreshold);
+    
+    AndroidBitmap_unlockPixels(env, outBitmap);
+    AndroidBitmap_unlockPixels(env, inputBitmap);
+    
+    return outBitmap;
 }
 
 } // extern "C"

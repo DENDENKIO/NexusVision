@@ -377,7 +377,7 @@ class SheetsQueryEngine(private val index: NexusSheetsIndex) {
 
         val engine = NexusEngineManager.getInstance()
         if (engine.state.value is EngineState.Ready) {
-            return generateAiAnswer(query, formattedResults, engine)
+            return generateAiAnswer(query, formattedResults)
         }
         return formattedResults
     }
@@ -399,7 +399,7 @@ class SheetsQueryEngine(private val index: NexusSheetsIndex) {
     }
 
     private suspend fun generateAiAnswer(
-        userQuery: String, searchResults: String, engine: NexusEngineManager
+        userQuery: String, searchResults: String
     ): String {
         val context = searchResults.take(MAX_CONTEXT_LENGTH)
         val prompt = buildString {
@@ -414,8 +414,8 @@ class SheetsQueryEngine(private val index: NexusSheetsIndex) {
             appendLine("上記のデータに基づいて、質問に対して簡潔かつ正確に回答してください。データに含まれない情報は推測しないでください。")
         }
         return try {
-            val aiResult = engine.inferText(prompt)
-            val aiAnswer = aiResult.getOrNull()
+            val result = NexusEngineManager.getInstance().inferText(prompt)
+            val aiAnswer = result.getOrNull()
             if (aiAnswer != null) {
                 "$aiAnswer\n\n---\n(参照データ: ${searchResults.lines().count { it.startsWith("  行") }} 件)"
             } else searchResults

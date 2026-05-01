@@ -207,7 +207,7 @@ class ShareReceiver : ComponentActivity() {
         val engine = NexusEngineManager.getInstance()
         return if (engine.state.value is EngineState.Ready) {
             val result = engine.inferText("以下のテキストを簡潔に要約してください:\n\n$text")
-            result.getOrElse { "元テキスト:\n$text" }
+            result.getOrElse { "エンジンエラー: ${it.message}" }
         } else {
             "【共有テキスト受信】\n\n$text"
         }
@@ -237,7 +237,7 @@ class ShareReceiver : ComponentActivity() {
                     val text = ocrEngine.recognizeFromUri(applicationContext, uri)
                     results.appendLine(if (text.isNotBlank()) text else "(テキスト未検出)")
                 } catch (e: Exception) {
-                    results.appendLine("(エラー: ${e.message})")
+                    results.appendLine("エラー: 推論に失敗しました")
                 }
                 results.appendLine()
             }

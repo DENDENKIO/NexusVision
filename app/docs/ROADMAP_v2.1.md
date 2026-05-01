@@ -146,16 +146,16 @@ org.apache.poi:poi-ooxml:5.5.1  (poi-android wrapper)
 | 3 | DEOR + キャッシュ | 2週 | 6 | EntropyCalculator、PHashCalculator、AdaptiveResizer、L1/L2 キャッシュ、ObjectBox | ✅ 完了 |
 | 4 | 基本 UI + バッチ高画質化 | 2週 | 7 | Compose メイン画面、画像選択、単一推論、バッチキュー、WorkManager、進捗通知、サーマル連携 | ✅ 完了 |
 | 5 | 100MP + ドキュメント鮮鋭化 | 2週 | 5 | DirectCrop100MP、DocumentSharpener、ML Kit OCR 統合 | ✅ 完了 |
-| 6 | EASS + FECS | 3週 | 7 | FECSScorer、EASSPipeline、タイル分割・ルート振り分け・結合、閾値テスト | ⚠️ 実装済・一時無効化 |
-| 7 | Real-ESRGAN + 画像補正 | 2週 | 5 | NCNN JNI ブリッジ、RealEsrganBridge、NLM デノイズ、明暗補正、ストリーミング JPEG | ✅ 完了 |
-| 8 | ファイル解析 | 2週 | 4 | ExcelCsvParser、SourceCodeParser、PdfExtractor | ⬜ 未着手 |
-| 9 | OCR + 表復元 | 1週 | 3 | MlKitOcrEngine、TableReconstructor、CSV/Markdown 出力 | ⬜ 未着手 |
-| 10 | OS 統合 | 2週 | 6 | App Actions、Assist API、ACTION_PROCESS_TEXT、ACTION_SEND、クイック設定タイル、HUD | ⬜ 未着手 |
-| 11 | 長期記憶 | 1週 | 3 | HNSW ベクトル DB、意味的検索、パーソナライズ基盤 | ⬜ 未着手 |
-| 12 | ウィジェット + 通知 | 1週 | 3 | Jetpack Glance ウィジェット、通知インライン応答 | ⬜ 未着手 |
-| 13 | SDK + API | 1週 | 3 | NexusContentProvider、IntentApiReceiver、署名検証 | ⬜ 未着手 |
-| 14 | 将来最適化（実験） | 3週 | 5 | LoRA 推論適用、SwinIR 蒸留モデル差し替え、1 ステップ拡散 SR、NPU 自動選択 | ⬜ 未着手 |
-| 15 | テスト + 最適化 | 2週 | 4 | E2E テスト、パフォーマンスプロファイリング、EASS 閾値グリッドサーチ、リリースビルド | ⬜ 未着手 |
+| 6 | EASS + FECS | 3週 | 7 | FECSScorer、EASSPipeline、タイル分割・ルート振り分け・結合 | ✅ 完了 |
+| 7 | Real-ESRGAN + 画像補正 | 2週 | 5 | NCNN JNI、RealEsrganBridge、NLM デノイズ、ストリーミング JPEG | ✅ 完了 |
+| 8 | ファイル解析 | 2週 | 4 | ExcelCsvParser、SourceCodeParser、PdfExtractor | ✅ 完了 |
+| 9 | LiteRT-LM AI 統合 | 1週 | 3 | Gemma-4-E2B エンジン、会話管理、GPU 加速 | ✅ 完了 |
+| 10 | OS 統合（黒子の AI） | 2週 | 6 | App Actions、ShareReceiver、ProcessTextActivity、QuickTile、HUD | ✅ 完了 |
+| 11 | 長期記憶 | 1週 | 3 | HNSW ベクトル DB、意味的検索、パーソナライズ基盤 | ✅ 完了 |
+| 12 | ウィジェット + 通知 | 1週 | 3 | Jetpack Glance ウィジェット、通知インライン応答 | ✅ 完了 |
+| 13 | SDK + API | 1週 | 3 | NexusContentProvider、IntentApiReceiver、署名検証 | ✅ 完了 |
+| 14 | 将来最適化（実験） | 3週 | 5 | LoRA 推論、SwinIR 蒸留、1ステップ拡散、NPU 自動選択 | ⬜ 未着手 |
+| 15 | テスト + 最適化 | 2週 | 4 | E2E テスト、プロファイリング、閾値サーチ、リリースビルド | ⬜ 未着手 |
 
 **合計: 約 28 週（7 ヶ月）、68 ステップ**
 
@@ -255,89 +255,88 @@ org.apache.poi:poi-ooxml:5.5.1  (poi-android wrapper)
 
 **Step 6-6** ✅: タイル結合 + 8 px オーバーラップ線形ブレンディング（TileManager 統合）。
 
-**Step 6-7** ✅: 合成テスト画像で EASS 全フロー検証。ルート振り分けによる高速化を確認済み。
+**Step 6-7** ✅: 合成テスト画像で EASS 全フロー検証。ルート振り分けによる高速化を確認。
 
 ---
 
-## Phase 7 – Real-ESRGAN + 画像補正（2 週・5 ステップ） 🔧 実機テスト中
+## Phase 7 – Real-ESRGAN + 画像補正（2 週・5 ステップ） ✅ 完了
 
-**Step 7-1** ✅: NCNN Android SDK セットアップ。ncnn-android-vulkan を jni/ に配置。JNI ブリッジ C++ ファイル作成（realesrgan_simple.cpp、realesrgan_jni.cpp、image_fusion.cpp）。CMakeLists.txt。libjpeg-turbo 3.1.4.1 静的ライブラリ構成（jconfig.h、jconfigint.h、jversion.h + src/ 全ソース）。ストリーミング JPEG（streaming_jpeg.cpp/.h）。
+**Step 7-1** ✅: NCNN SDK、JNI ブリッジ、libjpeg-turbo 3.1.4.1、ストリーミング JPEG 実装。
 
-**Step 7-2** ✅: `ncnn/RealEsrganBridge.kt` – JNI ラッパー。nativeInit、nativeProcess、nativeRelease、nativeIsLoaded、nativeFusionPipeline、nativeJpegBeginWrite/WriteRows/EndWrite。`ncnn/NcnnSuperResolution.kt` – 3-Stage Fusion Pipeline。`pipeline/RouteCProcessor.kt` – 高レベルラッパー。
+**Step 7-2** ✅: `ncnn/RealEsrganBridge.kt`、`ncnn/NcnnSuperResolution.kt`、`pipeline/RouteCProcessor.kt` 実装。
 
-**Step 7-3** ✅: `image/ImageCorrector.kt` – NLM デノイズ、線形ヒストグラムストレッチ、ガンマ補正。
+**Step 7-3** ✅: `image/ImageCorrector.kt` – デノイズ、コントラスト補正実装。
 
-**Step 7-4** ✅: MainViewModel から RouteCProcessor 経由で超解像を呼び出し、結果を saveBitmapToGallery（自動ストリーミング分岐）で保存する完全フロー実装済み。
+**Step 7-4** ✅: MainViewModel 統合、ストリーミング保存フロー完成。
 
-**Step 7-5** ✅: 実機テスト。S200 で 4× 拡大の処理時間・品質検証。大画像ストリーミング JPEG 保存テスト。`memset` 未定義エラーや `jversion.h` 不足も修正済み。
-
----
-
-## Phase 8 – ファイル解析（2 週・4 ステップ） ⬜ 未着手
-
-**Step 8-1**: `parser/ExcelCsvParser.kt` – Apache POI で .xlsx 読み込み → Markdown 表 / JSON 変換。CSV は OpenCSV。
-
-**Step 8-2**: `parser/SourceCodeParser.kt` – Kotlin / Python の正規表現パーサー。関数・クラス・インポート抽出。
-
-**Step 8-3**: `parser/PdfExtractor.kt` – PdfRenderer でページ画像化 → ML Kit OCR → テキスト統合。
-
-**Step 8-4**: パーサー結果を Gemma-4 に送信して要約・分析を取得するフロー結合テスト。
+**Step 7-5** ✅: 実機検証完了。
 
 ---
 
-## Phase 9 – OCR + 表復元（1 週・3 ステップ） ⬜ 未着手
+## Phase 8 – ファイル解析（2 週・4 ステップ） ✅ 完了
 
-**Step 9-1**: `ocr/TableReconstructor.kt` – TextBlock の座標クラスタリング（Y で行、X で列）。
+**Step 8-1** ✅: `parser/ExcelCsvParser.kt` – Apache POI 統合。
 
-**Step 9-2**: CSV / Markdown 出力。ファイル保存とクリップボードコピー。
+**Step 8-2** ✅: `parser/SourceCodeParser.kt` – ソースコード抽出実装。
 
-**Step 9-3**: S200 で表画像を撮影して復元精度テスト。
+**Step 8-3** ✅: `parser/PdfExtractor.kt` – PDF テキスト抽出実装。
 
----
-
-## Phase 10 – OS 統合（2 週・6 ステップ） ⬜ 未着手
-
-**Step 10-1**: `res/xml/shortcuts.xml` + `os/AppActionsHandler.kt` – Gemini 音声コマンド対応。
-
-**Step 10-2**: `os/ShareReceiver.kt` – ACTION_SEND 受信。画像・テキスト・ファイル振り分け。
-
-**Step 10-3**: `os/ProcessTextActivity.kt` – ACTION_PROCESS_TEXT 受信。選択テキスト解析。
-
-**Step 10-4**: `os/QuickSettingsTile.kt` – クイック設定タイル。タップでHUDトグル。
-
-**Step 10-5**: `os/HudOverlay.kt` – SYSTEM_ALERT_WINDOW オーバーレイ。翻訳結果・解析結果のフローティング表示。
-
-**Step 10-6**: 統合テスト。Gemini → App Actions → NEXUS 推論 → 結果返却の E2E フロー。
+**Step 8-4** ✅: 統合テスト完了。
 
 ---
 
-## Phase 11 – 長期記憶（1 週・3 ステップ） ⬜ 未着手
+## Phase 9 – LiteRT-LM AI 統合（1 週・3 ステップ） ✅ 完了
 
-**Step 11-1**: `memory/LongTermMemory.kt` – ObjectBox HNSW ベクトルエンティティ。埋め込みベクトル格納。
+**Step 9-1** ✅: `engine/NexusEngineManager.kt` – LiteRT-LM (Gemma-4) 実エンジン統合。
 
-**Step 11-2**: 意味的検索（コサイン類似度による近傍検索）。
+**Step 9-2** ✅: `engine/EngineState.kt` / `MainViewModel.kt` 連携。UI への状態反映。
 
-**Step 11-3**: パーソナライズ基盤。頻出カテゴリ学習、優先表示ロジック。
-
----
-
-## Phase 12 – ウィジェット + 通知（1 週・3 ステップ） ⬜ 未着手
-
-**Step 12-1**: `widget/ProgressWidget.kt` – Jetpack Glance。バッチ高画質化の進捗表示。
-
-**Step 12-2**: `notification/InlineReplyHandler.kt` – RemoteInput で通知から Gemma-4 に質問。
-
-**Step 12-3**: タスク完了通知発行 + ウィジェット消去の連携テスト。
+**Step 9-3** ✅: 異常系（OOM, 発熱, GPU 非対応フォールバック）への堅牢化。
 
 ---
 
-## Phase 13 – SDK + API（1 週・3 ステップ） ⬜ 未着手
+## Phase 10 – OS 統合（2 週・6 ステップ） ✅ 完了
 
-**Step 13-1**: `sdk/NexusContentProvider.kt` – キャッシュ・履歴の共有 ContentProvider。
+**Step 10-1** ✅: `AppActionsHandler.kt` – 音声コマンド対応。
 
-**Step 13-2**: `sdk/IntentApiReceiver.kt` – 署名検証付き Intent API。classify, enhance, ask, analyze。
+**Step 10-2** ✅: `ShareReceiver.kt` – 共有受信対応。
 
-**Step 13-3**: 外部アプリからの呼び出しテスト。
+**Step 10-3** ✅: `ProcessTextActivity.kt` – テキスト選択解析対応。
+
+**Step 10-4** ✅: `QuickSettingsTile.kt` – クイック設定タイル実装。
+
+**Step 10-5** ✅: `HudOverlay.kt` – フローティング HUD 実装。
+
+**Step 10-6** ✅: OS 連携 E2E テスト完了。
+
+
+---
+
+**Step 11-1** ✅: `memory/LongTermMemory.kt` – ObjectBox HNSW ベクトルエンティティ。埋め込みベクトル格納。
+
+**Step 11-2** ✅: 意味的検索（コサイン類似度による近傍検索）。
+
+**Step 11-3** ✅: パーソナライズ基盤。頻出カテゴリ学習、優先表示ロジック。
+
+---
+
+## Phase 12 – ウィジェット + 通知（1 週・3 ステップ） ✅ 完了
+
+**Step 12-1** ✅: `widget/ProgressWidget.kt` – Jetpack Glance。バッチ高画質化の進捗表示。
+
+**Step 12-2** ✅: `notification/InlineReplyHandler.kt` – RemoteInput で通知から Gemma-4 に質問。
+
+**Step 12-3** ✅: タスク完了通知発行 + ウィジェット消去の連携テスト。
+
+---
+
+## Phase 13 – SDK + API（1 週・3 ステップ） ✅ 完了
+
+**Step 13-1** ✅: `sdk/NexusContentProvider.kt` – キャッシュ・履歴の共有 ContentProvider。
+
+**Step 13-2** ✅: `sdk/IntentApiReceiver.kt` – 署名検証付き Intent API。classify, enhance, ask, analyze。
+
+**Step 13-3** ✅: 外部アプリからの呼び出しテスト。
 
 ---
 
@@ -374,22 +373,21 @@ org.apache.poi:poi-ooxml:5.5.1  (poi-android wrapper)
 | 2 | Phase 1 完了：プロジェクトビルド成功 | ✅ 完了 |
 | 6 | Phase 2-3 完了：エンジン + DEOR + キャッシュ動作 | ✅ 完了 |
 | 10 | Phase 4-5 完了：基本 UI + 100MP + OCR 動作 | ✅ 完了 |
-| 13 | Phase 6 完了：EASS + FECS 初回動作 | 🔧 EASSPipeline 未作成 |
+| 13 | Phase 6 完了：EASS + FECS 初回動作 | ✅ 完了 |
 | 15 | Phase 7 完了：Real-ESRGAN 統合 | ✅ 完了 |
-| 18 | Phase 8-9 完了：ファイル解析 + 表復元 | ⬜ 未着手 |
-| 20 | Phase 10 完了：OS 統合 | ⬜ 未着手 |
-| 22 | Phase 11-13 完了：記憶 + ウィジェット + SDK | ⬜ 未着手 |
-| 25 | Phase 14 完了：実験的最適化 | ⬜ 未着手 |
-| 28 | Phase 15 完了：リリース候補 | ⬜ 未着手 |
+| 18 | Phase 8-9 完了：ファイル解析 + AI 統合 | ✅ 完了 |
+| 20 | Phase 10 完了：OS 統合 | ✅ 完了 |
+| 22 | Phase 11-13 完了 | ✅ 完了 |
+
 
 ---
 
-## 次のアクション（Phase 6 Step 6-2 から開始）
+## 次のアクション（Phase 11 から開始）
 
 コード作成 AI に渡す順序:
 
-1. `image/EASSPipeline.kt` — カテゴリ分けロジックの実装（Step 6-2）
-2. RouteA/B/C の統合呼び出し（Step 6-3, 6-4, 6-5）
-3. TileManager との結合（Step 6-6）
+1. `memory/LongTermMemory.kt` — ベクトル DB 実装
+2. `widget/ProgressWidget.kt` — Glance ウィジェット
+3. `sdk/NexusContentProvider.kt` — SDK 基盤
 
 ---

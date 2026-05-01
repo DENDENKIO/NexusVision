@@ -143,7 +143,11 @@ add_library(realesrgan_native SHARED
     realesrgan_simple.cpp
     realesrgan_jni.cpp
     image_fusion.cpp
-    streaming_jpeg.cpp      # ← 新規追加
+    streaming_jpeg.cpp
+    neon_entropy.cpp
+    neon_dwt.cpp
+    neon_isauvola.cpp
+    safmn_jni.cpp          # ← Phase 14-1 追加
 )
 
 target_include_directories(realesrgan_native PRIVATE
