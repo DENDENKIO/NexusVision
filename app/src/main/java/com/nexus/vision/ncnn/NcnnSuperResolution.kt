@@ -3,222 +3,291 @@ package com.nexus.vision.ncnn
 import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.Canvas
+import android.graphics.Rect
 import android.util.Log
+import kotlin.math.ceil
+import kotlin.math.ln
+import kotlin.math.max
+import kotlin.math.min
 
+/**
+ * NCNN Real-ESRGAN 4× Super-Resolution with EASS tile selection
+ * Phase 14 optimized: Fusion OFF, TILE_SIZE=128, EASS/FECS routing
+ */
 class NcnnSuperResolution {
+
     companion object {
         private const val TAG = "NcnnSR"
         private const val PARAM_FILE = "models/realesr-general-x4v3.param"
         private const val MODEL_FILE = "models/realesr-general-x4v3.bin"
         private const val SCALE = 4
         private const val TILE_SIZE = 128
-
-        // --- 最適化: タイルサイズ拡大 ---
         private const val SR_MAX_INPUT = 256
         private const val PROCESS_TILE = 256
         private const val PROCESS_OVERLAP = 16
         private const val MAX_OUTPUT_SIDE = 4096
+
+        // ── EASS/FECS パラメータ ──
+        // FECS スコアがこの値未満のタイルは平坦と判定し、AI をスキップ
+        private const val FECS_THRESHOLD_LOW = 1.5f
+        // エッジ画素の割合（Sobel 閾値超え）
+        private const val EDGE_THRESHOLD = 30
     }
 
     private var initialized = false
 
-    // Fusion ON/OFF 切り替えフラグ（テスト用）は削除 -> Direct 固定
-    // var useFusion = false
-
     fun initialize(context: Context): Boolean {
         if (initialized && RealEsrganBridge.nativeIsLoaded()) return true
         return try {
-            val result = RealEsrganBridge.nativeInit(
+            // NOTE: Keep using AssetManager-based nativeInit to match existing JNI signature
+            val success = RealEsrganBridge.nativeInit(
                 context.assets, PARAM_FILE, MODEL_FILE, SCALE, TILE_SIZE
             )
-            initialized = result
-            if (result) Log.i(TAG, "Initialized (Vulkan+FP16, tile=$TILE_SIZE)")
-            else Log.e(TAG, "Init failed")
-            result
+            if (success) {
+                initialized = true
+                Log.i(TAG, "Initialized NcnnSR (tile=$TILE_SIZE)")
+            } else {
+                Log.e(TAG, "nativeInit returned false")
+            }
+            success
         } catch (e: Exception) {
             Log.e(TAG, "Init error: ${e.message}")
             false
         }
     }
 
-    suspend fun upscale(bitmap: Bitmap): Bitmap? {
-        if (!initialized || !RealEsrganBridge.nativeIsLoaded()) {
-            Log.e(TAG, "Model not loaded")
-            return null
-        }
-        val maxSide = maxOf(bitmap.width, bitmap.height)
-        return if (maxSide <= SR_MAX_INPUT) {
-            Log.i(TAG, "Small image (${bitmap.width}x${bitmap.height}): direct 4x SR")
-            processSuperResolution(bitmap)
+    fun upscale(bitmap: Bitmap): Bitmap? {
+        if (!initialized) return null
+        val src = ensureArgb(bitmap)
+        val w = src.width
+        val h = src.height
+
+        return if (w <= SR_MAX_INPUT && h <= SR_MAX_INPUT) {
+            Log.i(TAG, "Direct SR: ${w}x${h} -> ${w * SCALE}x${h * SCALE}")
+            processSuperResolution(src)
         } else {
-            Log.i(TAG, "Large image (${bitmap.width}x${bitmap.height}): Tiled Pipeline")
-            processTiledPipeline(bitmap)
+            processTiledEass(src)
         }
     }
 
-    private fun processTiledPipeline(bitmap: Bitmap): Bitmap? {
-        return try {
-            val inW = bitmap.width
-            val inH = bitmap.height
-            val startTime = System.currentTimeMillis()
+    // ════════════════════════════════════════
+    //  EASS タイルパイプライン
+    // ════════════════════════════════════════
 
-            val scaleFactor = minOf(SCALE.toFloat(), MAX_OUTPUT_SIDE.toFloat() / maxOf(inW, inH))
-            val outW = (inW * scaleFactor).toInt()
-            val outH = (inH * scaleFactor).toInt()
+    private fun processTiledEass(src: Bitmap): Bitmap? {
+        val srcW = src.width
+        val srcH = src.height
 
-            Log.i(TAG, "Pipeline Start: ${inW}x${inH} -> ${outW}x${outH} (Scale: $scaleFactor)")
+        // 出力サイズ計算（MAX_OUTPUT_SIDE 制限）
+        val rawOutW = srcW * SCALE
+        val rawOutH = srcH * SCALE
+        val maxSide = max(rawOutW, rawOutH)
+        val outScale = if (maxSide > MAX_OUTPUT_SIDE) {
+            MAX_OUTPUT_SIDE.toFloat() / maxSide
+        } else 1f
+        val outW = (rawOutW * outScale).toInt()
+        val outH = (rawOutH * outScale).toInt()
+        val effectiveScale = outW.toFloat() / srcW
 
-            val original = ensureArgb(bitmap) ?: return null
-            val output = Bitmap.createBitmap(outW, outH, Bitmap.Config.ARGB_8888)
-            val canvas = Canvas(output)
+        Log.i(TAG, "EASS Pipeline: ${srcW}x${srcH} -> ${outW}x${outH} " +
+                "(scale=${String.format("%.2f", effectiveScale)})")
 
-            val step = PROCESS_TILE - PROCESS_OVERLAP
-            val tilesX = (inW + step - 1) / step
-            val tilesY = (inH + step - 1) / step
-            val totalTiles = tilesX * tilesY
+        val step = PROCESS_TILE - PROCESS_OVERLAP
+        val tilesX = ceil(srcW.toFloat() / step).toInt()
+        val tilesY = ceil(srcH.toFloat() / step).toInt()
+        val totalTiles = tilesX * tilesY
 
-            var processed = 0
-            var successCount = 0
+        Log.i(TAG, "Tiles: ${tilesX}x${tilesY} = $totalTiles " +
+                "(tile=$PROCESS_TILE, step=$step, FECS_threshold=$FECS_THRESHOLD_LOW)")
 
-            Log.i(TAG, "Tiles: ${tilesX}x${tilesY} = $totalTiles (tile=$PROCESS_TILE, step=$step)")
+        val output = Bitmap.createBitmap(outW, outH, Bitmap.Config.ARGB_8888)
+        val canvas = Canvas(output)
+        val startTime = System.currentTimeMillis()
 
-            for (ty in 0 until tilesY) {
-                for (tx in 0 until tilesX) {
-                    val srcLeft = (tx * step).coerceAtMost(inW - 1)
-                    val srcTop = (ty * step).coerceAtMost(inH - 1)
-                    val srcRight = (srcLeft + PROCESS_TILE).coerceAtMost(inW)
-                    val srcBottom = (srcTop + PROCESS_TILE).coerceAtMost(inH)
+        var successCount = 0
+        var aiCount = 0
+        var skipCount = 0
 
-                    val tileW = srcRight - srcLeft
-                    val tileH = srcBottom - srcTop
-                    if (tileW < 8 || tileH < 8) continue
+        for (ty in 0 until tilesY) {
+            for (tx in 0 until tilesX) {
+                val srcX = min(tx * step, srcW - 1)
+                val srcY = min(ty * step, srcH - 1)
+                val tileW = min(PROCESS_TILE, srcW - srcX)
+                val tileH = min(PROCESS_TILE, srcH - srcY)
 
-                    val origTile = Bitmap.createBitmap(original, srcLeft, srcTop, tileW, tileH)
+                if (tileW < 4 || tileH < 4) continue
 
-                    // タイルを処理（Direct 固定）
-                    val resultTile = processOneTileDirect(origTile)
+                // タイル切り出し
+                val tile = Bitmap.createBitmap(src, srcX, srcY, tileW, tileH)
 
-                    val outLeft = (srcLeft * scaleFactor).toInt()
-                    val outTop = (srcTop * scaleFactor).toInt()
-                    val outRight = if (tx == tilesX - 1) outW else (srcRight * scaleFactor).toInt()
-                    val outBottom = if (ty == tilesY - 1) outH else (srcBottom * scaleFactor).toInt()
-                    val targetW = outRight - outLeft
-                    val targetH = outBottom - outTop
+                // ── FECS スコア計算 ──
+                val fecs = calculateFecs(tile)
 
-                    if (resultTile != null) {
-                        val scaled = if (resultTile.width == targetW && resultTile.height == targetH)
-                            resultTile
-                        else Bitmap.createScaledBitmap(resultTile, targetW, targetH, true)
-                        canvas.drawBitmap(scaled, outLeft.toFloat(), outTop.toFloat(), null)
-                        if (scaled !== resultTile) scaled.recycle()
-                        resultTile.recycle()
-                        successCount++
-                    } else {
-                        val fallback = Bitmap.createScaledBitmap(origTile, targetW, targetH, true)
-                        canvas.drawBitmap(fallback, outLeft.toFloat(), outTop.toFloat(), null)
-                        fallback.recycle()
-                    }
+                // 出力領域
+                val dstX = (srcX * effectiveScale).toInt()
+                val dstY = (srcY * effectiveScale).toInt()
+                val dstW = (tileW * effectiveScale).toInt().coerceAtLeast(1)
+                val dstH = (tileH * effectiveScale).toInt().coerceAtLeast(1)
+                val dstRect = Rect(dstX, dstY, dstX + dstW, dstY + dstH)
 
-                    origTile.recycle()
-                    processed++
+                val resultTile: Bitmap? = if (fecs < FECS_THRESHOLD_LOW) {
+                    // ── Route A: 平坦タイル → バイキュービック ──
+                    skipCount++
+                    Bitmap.createScaledBitmap(tile, dstW, dstH, true)
+                } else {
+                    // ── Route C: 高情報タイル → AI (Real-ESRGAN) ──
+                    aiCount++
+                    processOneTileDirect(tile, dstW, dstH)
+                }
 
-                    if (processed % 5 == 0 || processed == totalTiles) {
-                        Log.i(TAG, "Progress: $processed/$totalTiles")
-                    }
+                if (resultTile != null) {
+                    canvas.drawBitmap(resultTile, null, dstRect, null)
+                    successCount++
+                    if (resultTile !== tile) resultTile.recycle()
+                }
+                tile.recycle()
+
+                // 進捗ログ（5タイルごと）
+                val done = ty * tilesX + tx + 1
+                if (done % 5 == 0 || done == totalTiles) {
+                    Log.i(TAG, "Progress: $done/$totalTiles " +
+                            "(AI=$aiCount, skip=$skipCount)")
                 }
             }
-
-            if (original !== bitmap) original.recycle()
-
-            val elapsed = System.currentTimeMillis() - startTime
-            Log.i(TAG, "Pipeline Done: ${outW}x${outH}, $successCount/$totalTiles tiles, ${elapsed}ms")
-
-            output
-        } catch (e: Exception) {
-            Log.e(TAG, "Pipeline error: ${e.message}")
-            null
         }
+
+        val elapsed = System.currentTimeMillis() - startTime
+        Log.i(TAG, "EASS Done: ${outW}x${outH}, " +
+                "$successCount/$totalTiles tiles, " +
+                "AI=$aiCount, skip=$skipCount (${skipPercent(skipCount, totalTiles)}%), " +
+                "${elapsed}ms")
+
+        return output
     }
 
-    /**
-     * Fusion なし: AI SR の出力をそのまま使う（油絵感・ノイズ軽減テスト）
-     */
-    private fun processOneTileDirect(origTile: Bitmap): Bitmap? {
-        return try {
-            val srInput = limitSize(origTile, SR_MAX_INPUT)
-            val srArgb = ensureArgb(srInput) ?: return null
-            val aiResult = RealEsrganBridge.nativeProcess(srArgb)
-            if (srArgb !== srInput) srArgb.recycle()
-            if (srInput !== origTile) srInput.recycle()
+    // ════════════════════════════════════════
+    //  FECS スコア計算
+    //  FECS = H × (E_mid + 2 × E_high) / (1 + E_low)
+    // ════════════════════════════════════════
+
+    private fun calculateFecs(tile: Bitmap): Float {
+        val w = tile.width
+        val h = tile.height
+        val pixels = IntArray(w * h)
+        tile.getPixels(pixels, 0, w, 0, 0, w, h)
+
+        // グレースケール輝度
+        val gray = IntArray(w * h)
+        for (i in pixels.indices) {
+            val p = pixels[i]
+            val r = (p shr 16) and 0xFF
+            val g = (p shr 8) and 0xFF
+            val b = p and 0xFF
+            gray[i] = (0.299f * r + 0.587f * g + 0.114f * b).toInt()
+        }
+
+        // ── シャノンエントロピー H ──
+        val hist = IntArray(256)
+        for (v in gray) hist[v]++
+        val total = gray.size.toFloat()
+        var entropy = 0f
+        for (count in hist) {
+            if (count > 0) {
+                val p = count / total
+                entropy -= p * (ln(p.toDouble()) / ln(2.0)).toFloat()
+            }
+        }
+
+        // ── Sobel エッジ強度分布 ──
+        var eLow = 0
+        var eMid = 0
+        var eHigh = 0
+        for (y in 1 until h - 1) {
+            for (x in 1 until w - 1) {
+                val gx = -gray[(y - 1) * w + (x - 1)] +
+                        gray[(y - 1) * w + (x + 1)] -
+                        2 * gray[y * w + (x - 1)] +
+                        2 * gray[y * w + (x + 1)] -
+                        gray[(y + 1) * w + (x - 1)] +
+                        gray[(y + 1) * w + (x + 1)]
+                val gy = -gray[(y - 1) * w + (x - 1)] -
+                        2 * gray[(y - 1) * w + x] -
+                        gray[(y - 1) * w + (x + 1)] +
+                        gray[(y + 1) * w + (x - 1)] +
+                        2 * gray[(y + 1) * w + x] +
+                        gray[(y + 1) * w + (x + 1)]
+                val mag = kotlin.math.sqrt((gx * gx + gy * gy).toFloat()).toInt()
+
+                when {
+                    mag < EDGE_THRESHOLD -> eLow++
+                    mag < EDGE_THRESHOLD * 3 -> eMid++
+                    else -> eHigh++
+                }
+            }
+        }
+
+        // FECS = H × (E_mid + 2 × E_high) / (1 + E_low)
+        val fecs = entropy * (eMid + 2f * eHigh) / (1f + eLow)
+        return fecs
+    }
+
+    // ════════════════════════════════════════
+    //  タイル処理（AI）
+    // ════════════════════════════════════════
+
+    private fun processOneTileDirect(
+        tile: Bitmap, targetW: Int, targetH: Int
+    ): Bitmap? {
+        val input = limitSize(ensureArgb(tile))
+        val aiResult = RealEsrganBridge.nativeProcess(input) ?: return null
+        // ターゲットサイズにリサイズ
+        return if (aiResult.width != targetW || aiResult.height != targetH) {
+            val scaled = Bitmap.createScaledBitmap(aiResult, targetW, targetH, true)
+            aiResult.recycle()
+            scaled
+        } else {
             aiResult
-        } catch (e: Exception) {
-            Log.e(TAG, "Direct tile error: ${e.message}")
-            null
         }
     }
 
-    /**
-     * Fusion あり: AI SR + Guided Filter + DWT + IBP（従来の処理）
-     */
-    private fun processOneTileFusion(origTile: Bitmap): Bitmap? {
-        var srInput: Bitmap? = null
-        var srArgb: Bitmap? = null
-        var aiResult: Bitmap? = null
-        var origUpscaled: Bitmap? = null
-
-        return try {
-            srInput = limitSize(origTile, SR_MAX_INPUT)
-            srArgb = ensureArgb(srInput) ?: return null
-            aiResult = RealEsrganBridge.nativeProcess(srArgb) ?: return null
-
-            val aiW = aiResult.width
-            val aiH = aiResult.height
-            val scaledRef = Bitmap.createScaledBitmap(origTile, aiW, aiH, true)
-            origUpscaled = ensureArgb(scaledRef) ?: return null
-            if (scaledRef !== origUpscaled) scaledRef.recycle()
-
-            RealEsrganBridge.nativeFusionPipeline(origUpscaled, aiResult, srArgb)
-        } catch (e: Exception) {
-            Log.e(TAG, "Fusion tile error: ${e.message}")
-            null
-        } finally {
-            if (srArgb !== srInput) srArgb?.recycle()
-            if (srInput !== origTile) srInput?.recycle()
-            aiResult?.recycle()
-            origUpscaled?.recycle()
-        }
-    }
+    // ════════════════════════════════════════
+    //  小画像用ダイレクト処理
+    // ════════════════════════════════════════
 
     private fun processSuperResolution(bitmap: Bitmap): Bitmap? {
-        return try {
-            val argb = ensureArgb(bitmap) ?: return null
-            Log.i(TAG, "SR Start: ${argb.width}x${argb.height} -> ${argb.width * SCALE}x${argb.height * SCALE}")
-            val result = RealEsrganBridge.nativeProcess(argb)
-            if (argb !== bitmap) argb.recycle()
-            result
-        } catch (e: Exception) {
-            Log.e(TAG, "Direct SR error: ${e.message}")
-            null
-        }
+        val input = limitSize(ensureArgb(bitmap))
+        return RealEsrganBridge.nativeProcess(input)
+    }
+
+    // ════════════════════════════════════════
+    //  ユーティリティ
+    // ════════════════════════════════════════
+
+    private fun ensureArgb(bitmap: Bitmap): Bitmap {
+        return if (bitmap.config == Bitmap.Config.ARGB_8888) bitmap
+        else bitmap.copy(Bitmap.Config.ARGB_8888, false)
+    }
+
+    private fun limitSize(bitmap: Bitmap): Bitmap {
+        val w = bitmap.width
+        val h = bitmap.height
+        val maxSide = max(w, h)
+        if (maxSide <= SR_MAX_INPUT) return bitmap
+        val scale = SR_MAX_INPUT.toFloat() / maxSide
+        val newW = (w * scale).toInt().coerceAtLeast(1)
+        val newH = (h * scale).toInt().coerceAtLeast(1)
+        return Bitmap.createScaledBitmap(bitmap, newW, newH, true)
+    }
+
+    private fun skipPercent(skip: Int, total: Int): Int {
+        return if (total > 0) (skip * 100 / total) else 0
     }
 
     fun release() {
-        try { RealEsrganBridge.nativeRelease() } catch (e: Exception) { Log.e(TAG, "Release: ${e.message}") }
-        initialized = false
-    }
-
-    private fun ensureArgb(bitmap: Bitmap): Bitmap? {
-        return if (bitmap.config != Bitmap.Config.ARGB_8888)
-            bitmap.copy(Bitmap.Config.ARGB_8888, false)
-        else bitmap
-    }
-
-    private fun limitSize(bitmap: Bitmap, maxSide: Int): Bitmap {
-        val max = maxOf(bitmap.width, bitmap.height)
-        if (max <= maxSide) return bitmap
-        val ratio = maxSide.toFloat() / max
-        val newW = (bitmap.width * ratio).toInt().coerceAtLeast(8)
-        val newH = (bitmap.height * ratio).toInt().coerceAtLeast(8)
-        return Bitmap.createScaledBitmap(bitmap, newW, newH, true)
+        if (initialized) {
+            RealEsrganBridge.nativeRelease()
+            initialized = false
+            Log.i(TAG, "Released NcnnSR")
+        }
     }
 }
