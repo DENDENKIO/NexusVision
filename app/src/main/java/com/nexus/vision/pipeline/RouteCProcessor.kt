@@ -25,36 +25,35 @@ class RouteCProcessor(private val context: Context) {
 
     private var esrgan: NcnnSuperResolution? = null
     private var safmn: SafmnSuperResolution? = null
-    var activeModel: SrModel = SrModel.SAFMN_PP
+    var activeModel: SrModel = SrModel.REAL_ESRGAN
         private set
 
     /**
-     * 両モデルを初期化。SAFMN++ を優先、失敗時は Real-ESRGAN へフォールバック。
+     * 両モデルを初期化。Real-ESRGAN を優先的に使用。
      */
     fun initialize(): Boolean {
-        // SAFMN++ を先に試す
-        safmn = SafmnSuperResolution()
-        val safmnOk = safmn?.initialize(context) ?: false
-        if (safmnOk) {
-            Log.i(TAG, "SAFMN++ initialized (primary)")
-            activeModel = SrModel.SAFMN_PP
-        } else {
-            Log.w(TAG, "SAFMN++ init failed, falling back to Real-ESRGAN")
-            safmn = null
-        }
-
-        // Real-ESRGAN も初期化（フォールバック用、またはユーザー切替用）
+        // Real-ESRGAN を初期化
         esrgan = NcnnSuperResolution()
         val esrganOk = esrgan?.initialize(context) ?: false
         if (esrganOk) {
-            Log.i(TAG, "Real-ESRGAN initialized (fallback)")
-            if (!safmnOk) activeModel = SrModel.REAL_ESRGAN
+            Log.i(TAG, "Real-ESRGAN initialized (primary)")
+            activeModel = SrModel.REAL_ESRGAN
         } else {
-            Log.e(TAG, "Real-ESRGAN init also failed")
+            Log.e(TAG, "Real-ESRGAN init failed")
             esrgan = null
         }
 
-        return safmnOk || esrganOk
+        // SAFMN++ も初期化（無効化中だが構造は維持）
+        safmn = SafmnSuperResolution()
+        val safmnOk = safmn?.initialize(context) ?: false
+        if (safmnOk) {
+            Log.i(TAG, "SAFMN++ initialized")
+        } else {
+            Log.d(TAG, "SAFMN++ disabled or init failed")
+            safmn = null
+        }
+
+        return esrganOk || safmnOk
     }
 
     /**

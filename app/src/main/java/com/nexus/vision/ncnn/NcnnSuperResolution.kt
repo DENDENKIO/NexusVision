@@ -3,33 +3,28 @@ package com.nexus.vision.ncnn
 import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.Canvas
-import android.graphics.Rect
 import android.util.Log
 
-/**
- * NcnnSuperResolution: 3-Stage Fusion Pipeline (AI + Guided Filter + DWT + IBP)
- * Optimized for high-resolution images with memory safety.
- */
 class NcnnSuperResolution {
     companion object {
         private const val TAG = "NcnnSR"
         private const val PARAM_FILE = "models/realesr-general-x4v3.param"
         private const val MODEL_FILE = "models/realesr-general-x4v3.bin"
         private const val SCALE = 4
-        private const val TILE_SIZE = 32
+        private const val TILE_SIZE = 128
 
-        // --- Constants for Fixed Fusion Pipeline ---
-        private const val SR_MAX_INPUT = 128        // Max side for AI input (AI Output will be 512)
-        private const val PROCESS_TILE = 128         // Source tile size
-        private const val PROCESS_OVERLAP = 16       // Overlap to prevent seams
-        private const val MAX_OUTPUT_SIDE = 4096     // Safety limit for output dimensions
+        // --- 最適化: タイルサイズ拡大 ---
+        private const val SR_MAX_INPUT = 256
+        private const val PROCESS_TILE = 256
+        private const val PROCESS_OVERLAP = 16
+        private const val MAX_OUTPUT_SIDE = 4096
     }
 
     private var initialized = false
 
-    /**
-     * Initialize the NCNN model and JNI environment.
-     */
+    // Fusion ON/OFF 切り替えフラグ（テスト用）は削除 -> Direct 固定
+    // var useFusion = false
+
     fun initialize(context: Context): Boolean {
         if (initialized && RealEsrganBridge.nativeIsLoaded()) return true
         return try {
@@ -46,9 +41,6 @@ class NcnnSuperResolution {
         }
     }
 
-    /**
-     * Entry point for upscaling/enhancing an image.
-     */
     suspend fun upscale(bitmap: Bitmap): Bitmap? {
         if (!initialized || !RealEsrganBridge.nativeIsLoaded()) {
             Log.e(TAG, "Model not loaded")
@@ -59,27 +51,22 @@ class NcnnSuperResolution {
             Log.i(TAG, "Small image (${bitmap.width}x${bitmap.height}): direct 4x SR")
             processSuperResolution(bitmap)
         } else {
-            Log.i(TAG, "Large image (${bitmap.width}x${bitmap.height}): Tiled Fusion Pipeline")
-            processTiledFusionPipeline(bitmap)
+            Log.i(TAG, "Large image (${bitmap.width}x${bitmap.height}): Tiled Pipeline")
+            processTiledPipeline(bitmap)
         }
     }
 
-    /**
-     * Tiled fusion pipeline that increases resolution while preserving details.
-     */
-    private fun processTiledFusionPipeline(bitmap: Bitmap): Bitmap? {
+    private fun processTiledPipeline(bitmap: Bitmap): Bitmap? {
         return try {
             val inW = bitmap.width
             val inH = bitmap.height
             val startTime = System.currentTimeMillis()
 
-            // Step 1: Calculate output dimensions and scale factor
-            // Target is 4x, but capped by MAX_OUTPUT_SIDE
             val scaleFactor = minOf(SCALE.toFloat(), MAX_OUTPUT_SIDE.toFloat() / maxOf(inW, inH))
             val outW = (inW * scaleFactor).toInt()
             val outH = (inH * scaleFactor).toInt()
 
-            Log.i(TAG, "Fusion Pipeline Start: ${inW}x${inH} -> ${outW}x${outH} (Scale: $scaleFactor)")
+            Log.i(TAG, "Pipeline Start: ${inW}x${inH} -> ${outW}x${outH} (Scale: $scaleFactor)")
 
             val original = ensureArgb(bitmap) ?: return null
             val output = Bitmap.createBitmap(outW, outH, Bitmap.Config.ARGB_8888)
@@ -93,45 +80,40 @@ class NcnnSuperResolution {
             var processed = 0
             var successCount = 0
 
+            Log.i(TAG, "Tiles: ${tilesX}x${tilesY} = $totalTiles (tile=$PROCESS_TILE, step=$step)")
+
             for (ty in 0 until tilesY) {
                 for (tx in 0 until tilesX) {
                     val srcLeft = (tx * step).coerceAtMost(inW - 1)
                     val srcTop = (ty * step).coerceAtMost(inH - 1)
                     val srcRight = (srcLeft + PROCESS_TILE).coerceAtMost(inW)
                     val srcBottom = (srcTop + PROCESS_TILE).coerceAtMost(inH)
-                    
+
                     val tileW = srcRight - srcLeft
                     val tileH = srcBottom - srcTop
-                    
-                    if (tileW < 8 || tileH < 8) continue // Too small to process
+                    if (tileW < 8 || tileH < 8) continue
 
-                    // Step 3-1: Extract tile
                     val origTile = Bitmap.createBitmap(original, srcLeft, srcTop, tileW, tileH)
 
-                    // Step 3-2: Process one tile through fusion
-                    val fusedTile = processOneTileFusion(origTile)
+                    // タイルを処理（Direct 固定）
+                    val resultTile = processOneTileDirect(origTile)
 
-                    // Step 3-3: Write back to canvas with appropriate scaling
                     val outLeft = (srcLeft * scaleFactor).toInt()
                     val outTop = (srcTop * scaleFactor).toInt()
                     val outRight = if (tx == tilesX - 1) outW else (srcRight * scaleFactor).toInt()
                     val outBottom = if (ty == tilesY - 1) outH else (srcBottom * scaleFactor).toInt()
-                    
                     val targetW = outRight - outLeft
                     val targetH = outBottom - outTop
 
-                    if (fusedTile != null) {
-                        if (fusedTile.width == targetW && fusedTile.height == targetH) {
-                            canvas.drawBitmap(fusedTile, outLeft.toFloat(), outTop.toFloat(), null)
-                        } else {
-                            val scaled = Bitmap.createScaledBitmap(fusedTile, targetW, targetH, true)
-                            canvas.drawBitmap(scaled, outLeft.toFloat(), outTop.toFloat(), null)
-                            scaled.recycle()
-                        }
-                        fusedTile.recycle()
+                    if (resultTile != null) {
+                        val scaled = if (resultTile.width == targetW && resultTile.height == targetH)
+                            resultTile
+                        else Bitmap.createScaledBitmap(resultTile, targetW, targetH, true)
+                        canvas.drawBitmap(scaled, outLeft.toFloat(), outTop.toFloat(), null)
+                        if (scaled !== resultTile) scaled.recycle()
+                        resultTile.recycle()
                         successCount++
                     } else {
-                        // Fallback: simple upscale of original tile
                         val fallback = Bitmap.createScaledBitmap(origTile, targetW, targetH, true)
                         canvas.drawBitmap(fallback, outLeft.toFloat(), outTop.toFloat(), null)
                         fallback.recycle()
@@ -139,27 +121,44 @@ class NcnnSuperResolution {
 
                     origTile.recycle()
                     processed++
-                    
-                    if (processed % 10 == 0 || processed == totalTiles) {
+
+                    if (processed % 5 == 0 || processed == totalTiles) {
                         Log.i(TAG, "Progress: $processed/$totalTiles")
                     }
                 }
             }
 
             if (original !== bitmap) original.recycle()
-            
+
             val elapsed = System.currentTimeMillis() - startTime
-            Log.i(TAG, "Fusion Pipeline Done: ${outW}x${outH}, $successCount/$totalTiles tiles, ${elapsed}ms")
-            
+            Log.i(TAG, "Pipeline Done: ${outW}x${outH}, $successCount/$totalTiles tiles, ${elapsed}ms")
+
             output
         } catch (e: Exception) {
-            Log.e(TAG, "Fusion pipeline error: ${e.message}")
+            Log.e(TAG, "Pipeline error: ${e.message}")
             null
         }
     }
 
     /**
-     * Core logic for fusing AI output and original image details.
+     * Fusion なし: AI SR の出力をそのまま使う（油絵感・ノイズ軽減テスト）
+     */
+    private fun processOneTileDirect(origTile: Bitmap): Bitmap? {
+        return try {
+            val srInput = limitSize(origTile, SR_MAX_INPUT)
+            val srArgb = ensureArgb(srInput) ?: return null
+            val aiResult = RealEsrganBridge.nativeProcess(srArgb)
+            if (srArgb !== srInput) srArgb.recycle()
+            if (srInput !== origTile) srInput.recycle()
+            aiResult
+        } catch (e: Exception) {
+            Log.e(TAG, "Direct tile error: ${e.message}")
+            null
+        }
+    }
+
+    /**
+     * Fusion あり: AI SR + Guided Filter + DWT + IBP（従来の処理）
      */
     private fun processOneTileFusion(origTile: Bitmap): Bitmap? {
         var srInput: Bitmap? = null
@@ -168,35 +167,21 @@ class NcnnSuperResolution {
         var origUpscaled: Bitmap? = null
 
         return try {
-            val tileW = origTile.width
-            val tileH = origTile.height
-
-            // 1. Prepare AI input (should already be <= 128x128)
             srInput = limitSize(origTile, SR_MAX_INPUT)
             srArgb = ensureArgb(srInput) ?: return null
-
-            // 2. AI 4x Super-Resolution
             aiResult = RealEsrganBridge.nativeProcess(srArgb) ?: return null
 
-            // 3. Upscale original reference to match AI output size (e.g. 128x128 -> 512x512)
             val aiW = aiResult.width
             val aiH = aiResult.height
             val scaledRef = Bitmap.createScaledBitmap(origTile, aiW, aiH, true)
             origUpscaled = ensureArgb(scaledRef) ?: return null
             if (scaledRef !== origUpscaled) scaledRef.recycle()
 
-            // 4. Detail Fusion (Guided+DWT+IBP)
-            // originalBitmap: 512x512 (High Frequency Source)
-            // aiEnhancedBitmap: 512x512 (Structure Source)
-            // aiLowResBitmap: 128x128 (IBP Reference)
-            val fused = RealEsrganBridge.nativeFusionPipeline(origUpscaled, aiResult, srArgb)
-            
-            fused
+            RealEsrganBridge.nativeFusionPipeline(origUpscaled, aiResult, srArgb)
         } catch (e: Exception) {
-            Log.e(TAG, "OneTile fusion error: ${e.message}")
+            Log.e(TAG, "Fusion tile error: ${e.message}")
             null
         } finally {
-            // Clean up temporary bitmaps
             if (srArgb !== srInput) srArgb?.recycle()
             if (srInput !== origTile) srInput?.recycle()
             aiResult?.recycle()
@@ -204,9 +189,6 @@ class NcnnSuperResolution {
         }
     }
 
-    /**
-     * Simple 4x Super Resolution for small images.
-     */
     private fun processSuperResolution(bitmap: Bitmap): Bitmap? {
         return try {
             val argb = ensureArgb(bitmap) ?: return null
@@ -220,30 +202,17 @@ class NcnnSuperResolution {
         }
     }
 
-    /**
-     * Releases model resources manually.
-     */
     fun release() {
-        try {
-            RealEsrganBridge.nativeRelease()
-        } catch (e: Exception) {
-            Log.e(TAG, "Release: ${e.message}")
-        }
+        try { RealEsrganBridge.nativeRelease() } catch (e: Exception) { Log.e(TAG, "Release: ${e.message}") }
         initialized = false
     }
 
-    /**
-     * Ensures bitmap is in ARGB_8888 format for C++ processing.
-     */
     private fun ensureArgb(bitmap: Bitmap): Bitmap? {
-        return if (bitmap.config != Bitmap.Config.ARGB_8888) {
+        return if (bitmap.config != Bitmap.Config.ARGB_8888)
             bitmap.copy(Bitmap.Config.ARGB_8888, false)
-        } else bitmap
+        else bitmap
     }
 
-    /**
-     * Limits bitmap size to a maximum side while maintaining aspect ratio.
-     */
     private fun limitSize(bitmap: Bitmap, maxSide: Int): Bitmap {
         val max = maxOf(bitmap.width, bitmap.height)
         if (max <= maxSide) return bitmap
