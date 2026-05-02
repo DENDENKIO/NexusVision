@@ -26,6 +26,7 @@ import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.compose.rememberNavController
 import com.nexus.vision.audio.TunerScreen
+import com.nexus.vision.translate.TranslateScreen
 
 class MainActivity : ComponentActivity() {
 
@@ -100,6 +101,7 @@ class MainActivity : ComponentActivity() {
                             onPickFile = { launchFilePicker() },
                             onPickMultipleImages = { launchMultipleImagePicker() },
                             onNavigateToTuner = { navController.navigate("tuner") },
+                            onNavigateToTranslate = { navController.navigate("translate") },
                             onImageSelected = { callback ->
                                 onImageSelected = callback
                             },
@@ -110,6 +112,9 @@ class MainActivity : ComponentActivity() {
                     }
                     composable("tuner") {
                         TunerScreen()
+                    }
+                    composable("translate") {
+                        TranslateScreen()
                     }
                 }
             }

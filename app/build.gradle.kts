@@ -105,6 +105,8 @@ dependencies {
     implementation("com.google.mlkit:barcode-scanning:17.3.0")
     implementation("com.google.mlkit:text-recognition:16.0.1")
     implementation("com.google.mlkit:text-recognition-japanese:16.0.1")
+    implementation("com.google.mlkit:translate:17.0.3")
+    implementation("com.google.mlkit:language-id:17.0.6")
 
     // LiteRT-LM (Gemma-4-E2B) — Phase 9: AI エンジン有効化
     implementation("com.google.ai.edge.litertlm:litertlm-android:0.10.2")

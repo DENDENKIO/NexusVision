@@ -43,6 +43,7 @@ import com.nexus.vision.ui.components.ChatInput
 import com.nexus.vision.ui.components.CropSelector
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Tune
+import androidx.compose.material.icons.filled.Translate
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -52,6 +53,7 @@ fun MainScreen(
     onPickFile: () -> Unit = {},
     onPickMultipleImages: () -> Unit = {},
     onNavigateToTuner: () -> Unit = {},
+    onNavigateToTranslate: () -> Unit = {},
     onImageSelected: ((android.net.Uri) -> Unit) -> Unit = {},
     onMultipleImagesSelected: ((List<android.net.Uri>) -> Unit) -> Unit = {}
 ) {
@@ -99,6 +101,13 @@ fun MainScreen(
                         androidx.compose.material3.Icon(
                             imageVector = Icons.Default.Tune,
                             contentDescription = "チューナー",
+                            tint = MaterialTheme.colorScheme.onSurface
+                        )
+                    }
+                    androidx.compose.material3.IconButton(onClick = onNavigateToTranslate) {
+                        androidx.compose.material3.Icon(
+                            imageVector = Icons.Default.Translate,
+                            contentDescription = "翻訳",
                             tint = MaterialTheme.colorScheme.onSurface
                         )
                     }

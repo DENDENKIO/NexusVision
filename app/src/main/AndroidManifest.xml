@@ -173,6 +173,11 @@
             android:foregroundServiceType="mediaProjection"
             android:exported="false" />
 
+        <service
+            android:name=".translate.LiveTranslateService"
+            android:foregroundServiceType="microphone"
+            android:exported="false" />
+
     </application>
 
 </manifest>
