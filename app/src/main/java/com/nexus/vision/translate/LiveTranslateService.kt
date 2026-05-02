@@ -23,7 +23,6 @@ import android.view.MotionEvent
 import android.view.View
 import android.view.WindowManager
 import android.widget.FrameLayout
-import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.TextView
 import androidx.core.app.NotificationCompat
@@ -44,7 +43,9 @@ class LiveTranslateService : Service() {
         const val EXTRA_SOURCE_LANG = "source_lang"
         const val EXTRA_TARGET_LANG = "target_lang"
 
-        private const val LISTEN_DURATION_MS = 8000L // 1回の認識時間
+        // 再起動の間隔（長いほど動画への影響が小さい）
+        private const val RESTART_DELAY_MS = 2000L
+        private const val TRANSLATE_THROTTLE_MS = 1000L
     }
 
     private var windowManager: WindowManager? = null
@@ -67,6 +68,10 @@ class LiveTranslateService : Service() {
     // 字幕履歴（直近5件を表示）
     private val subtitleHistory = mutableListOf<Pair<String, String>>() // original, translated
     private var historyTextView: TextView? = null
+
+    private var currentButtonBg: View? = null
+    private var lastTranslateTime = 0L
+    private var lastTranslatedText = ""
 
     override fun onCreate() {
         super.onCreate()
@@ -269,7 +274,7 @@ class LiveTranslateService : Service() {
                 MotionEvent.ACTION_MOVE -> {
                     val dx = (event.rawX - touchX).toInt()
                     val dy = (event.rawY - touchY).toInt()
-                    if (Math.abs(dx) > 10 || Math.abs(dy) > 10) moved = true
+                    if (Math.abs(dx.toFloat()) > 10 || Math.abs(dy.toFloat()) > 10) moved = true
                     if (moved) {
                         params.x = initialX - dx
                         params.y = initialY + dy
@@ -293,67 +298,111 @@ class LiveTranslateService : Service() {
         windowManager?.addView(button, params)
     }
 
-    // ── ボタンタップ → 数秒間だけ認識 ──
     private fun onTranslateButtonTap(buttonBg: View) {
         if (isCurrentlyListening) {
-            // 既に認識中なら停止
+            Log.i(TAG, ">>> ボタン押下 — 停止")
+            isCurrentlyListening = false
             speechRecognizer?.stopListening()
+            speechRecognizer?.destroy()
+            speechRecognizer = null
+            resetButtonColor(buttonBg)
+            updateStatus("停止中 — ボタンを押して再開")
             return
         }
 
-        // ボタン色を変えて認識中を示す
+        Log.i(TAG, ">>> ボタン押下 — 開始")
+        isCurrentlyListening = true
         (buttonBg.background as? android.graphics.drawable.GradientDrawable)
             ?.setColor(Color.parseColor("#FF5722"))
-        updateStatus("聴いています...")
+        updateStatus("翻訳中...")
+        currentButtonBg = buttonBg
+        startContinuousListening()
+    }
 
-        if (speechRecognizer == null) {
-            speechRecognizer = SpeechRecognizer.createSpeechRecognizer(this)
-        }
+    private fun startContinuousListening() {
+        if (!isCurrentlyListening) return
+
+        Log.i(TAG, "=== 認識セッション開始 ===")
+        val sessionStart = System.currentTimeMillis()
+
+        speechRecognizer?.destroy()
+        speechRecognizer = SpeechRecognizer.createSpeechRecognizer(this)
 
         speechRecognizer!!.setRecognitionListener(object : RecognitionListener {
-            override fun onReadyForSpeech(params: Bundle?) {}
-            override fun onBeginningOfSpeech() {}
-            override fun onRmsChanged(rmsdB: Float) {}
-            override fun onBufferReceived(buffer: ByteArray?) {}
+            override fun onReadyForSpeech(params: Bundle?) {
+                Log.d(TAG, "[${elapsed(sessionStart)}] onReadyForSpeech — マイク取得完了")
+            }
+
+            override fun onBeginningOfSpeech() {
+                Log.d(TAG, "[${elapsed(sessionStart)}] onBeginningOfSpeech — 音声検出開始")
+            }
+
+            override fun onRmsChanged(rmsdB: Float) {
+                // 音量ログ（頻度が高いので間引きが必要ならここにロジックを追加）
+            }
+
+            override fun onBufferReceived(buffer: ByteArray?) {
+                Log.v(TAG, "[${elapsed(sessionStart)}] onBufferReceived — ${buffer?.size ?: 0} bytes")
+            }
+
             override fun onEndOfSpeech() {
-                isCurrentlyListening = false
-                resetButtonColor(buttonBg)
-                updateStatus("認識完了")
+                Log.i(TAG, "[${elapsed(sessionStart)}] onEndOfSpeech — 音声途切れ検出、再起動予約")
+                scheduleRestart()
             }
 
             override fun onError(error: Int) {
-                isCurrentlyListening = false
-                resetButtonColor(buttonBg)
-                val msg = when (error) {
-                    SpeechRecognizer.ERROR_NO_MATCH -> "音声が検出されませんでした"
-                    SpeechRecognizer.ERROR_SPEECH_TIMEOUT -> "タイムアウト"
-                    else -> "エラー($error)"
+                val errorName = when (error) {
+                    SpeechRecognizer.ERROR_NETWORK_TIMEOUT -> "NETWORK_TIMEOUT"
+                    SpeechRecognizer.ERROR_NETWORK -> "NETWORK"
+                    SpeechRecognizer.ERROR_AUDIO -> "AUDIO"
+                    SpeechRecognizer.ERROR_SERVER -> "SERVER"
+                    SpeechRecognizer.ERROR_CLIENT -> "CLIENT"
+                    SpeechRecognizer.ERROR_SPEECH_TIMEOUT -> "SPEECH_TIMEOUT"
+                    SpeechRecognizer.ERROR_NO_MATCH -> "NO_MATCH"
+                    SpeechRecognizer.ERROR_RECOGNIZER_BUSY -> "RECOGNIZER_BUSY"
+                    SpeechRecognizer.ERROR_INSUFFICIENT_PERMISSIONS -> "INSUFFICIENT_PERMISSIONS"
+                    SpeechRecognizer.ERROR_TOO_MANY_REQUESTS -> "TOO_MANY_REQUESTS"
+                    SpeechRecognizer.ERROR_LANGUAGE_NOT_SUPPORTED -> "LANGUAGE_NOT_SUPPORTED"
+                    SpeechRecognizer.ERROR_LANGUAGE_UNAVAILABLE -> "LANGUAGE_UNAVAILABLE"
+                    else -> "UNKNOWN($error)"
                 }
-                updateStatus(msg)
+                Log.w(TAG, "[${elapsed(sessionStart)}] onError — $errorName")
+
+                if (!isCurrentlyListening) return
+                updateStatus("$errorName — 再試行中...")
+                scheduleRestart()
             }
 
             override fun onResults(results: Bundle?) {
-                isCurrentlyListening = false
-                resetButtonColor(buttonBg)
-                val text = results?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
-                    ?.firstOrNull() ?: ""
+                val matches = results?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
+                val scores = results?.getFloatArray(SpeechRecognizer.CONFIDENCE_SCORES)
+                val text = matches?.firstOrNull() ?: ""
+                val confidence = scores?.firstOrNull() ?: 0f
+
+                Log.i(TAG, "[${elapsed(sessionStart)}] onResults — " +
+                        "text=\"$text\", confidence=${"%.2f".format(confidence)}, " +
+                        "candidates=${matches?.size ?: 0}")
+
                 if (text.isNotBlank()) {
-                    processResult(text)
+                    processResult(text, isFinal = true)
                 }
-                updateStatus("準備完了 — ボタンを押して翻訳")
+                scheduleRestart()
             }
 
             override fun onPartialResults(partialResults: Bundle?) {
                 val text = partialResults?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
                     ?.firstOrNull() ?: ""
+
+                Log.d(TAG, "[${elapsed(sessionStart)}] onPartialResults — \"$text\"")
+
                 if (text.isNotBlank()) {
-                    android.os.Handler(mainLooper).post {
-                        originalTextView?.text = "$text ..."
-                    }
+                    processResult(text, isFinal = false)
                 }
             }
 
-            override fun onEvent(eventType: Int, params: Bundle?) {}
+            override fun onEvent(eventType: Int, params: Bundle?) {
+                Log.d(TAG, "[${elapsed(sessionStart)}] onEvent — type=$eventType")
+            }
         })
 
         val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
@@ -361,55 +410,69 @@ class LiveTranslateService : Service() {
             putExtra(RecognizerIntent.EXTRA_LANGUAGE, sourceLang)
             putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, true)
             putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 1)
-            putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_COMPLETE_SILENCE_LENGTH_MILLIS, 3000L)
-            putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_POSSIBLY_COMPLETE_SILENCE_LENGTH_MILLIS, 2000L)
+            putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_COMPLETE_SILENCE_LENGTH_MILLIS, 10000L)
+            putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_POSSIBLY_COMPLETE_SILENCE_LENGTH_MILLIS, 8000L)
+            putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_MINIMUM_LENGTH_MILLIS, 15000L)
         }
 
         try {
-            isCurrentlyListening = true
             speechRecognizer?.startListening(intent)
-
-            // 安全タイマー: LISTEN_DURATION_MS 後に自動停止
-            android.os.Handler(mainLooper).postDelayed({
-                if (isCurrentlyListening) {
-                    speechRecognizer?.stopListening()
-                }
-            }, LISTEN_DURATION_MS)
+            Log.d(TAG, "startListening called — lang=$sourceLang")
         } catch (e: Exception) {
-            Log.e(TAG, "Listen failed", e)
-            isCurrentlyListening = false
-            resetButtonColor(buttonBg)
+            Log.e(TAG, "startListening FAILED", e)
+            scheduleRestart()
         }
     }
 
-    private fun resetButtonColor(buttonBg: View) {
-        android.os.Handler(mainLooper).post {
-            (buttonBg.background as? android.graphics.drawable.GradientDrawable)
-                ?.setColor(Color.parseColor("#2196F3"))
+    private fun scheduleRestart() {
+        if (!isCurrentlyListening) {
+            Log.d(TAG, "scheduleRestart — skipped (not listening)")
+            return
         }
+        Log.i(TAG, "scheduleRestart — ${RESTART_DELAY_MS}ms 後に再開")
+        android.os.Handler(mainLooper).postDelayed({
+            if (isCurrentlyListening) {
+                Log.i(TAG, "--- 再起動実行 ---")
+                startContinuousListening()
+            }
+        }, RESTART_DELAY_MS)
     }
 
-    private fun processResult(text: String) {
+    private fun processResult(text: String, isFinal: Boolean) {
         android.os.Handler(mainLooper).post {
-            originalTextView?.text = text
+            originalTextView?.text = if (isFinal) text else "$text ..."
         }
 
-        if (translatorReady) {
-            translator?.translate(text)
-                ?.addOnSuccessListener { translated ->
-                    android.os.Handler(mainLooper).post {
-                        translatedTextView?.text = translated
+        val now = System.currentTimeMillis()
+        if (!translatorReady || text.isBlank()) return
+        if (text == lastTranslatedText && !isFinal) return
+        if (!isFinal && now - lastTranslateTime < TRANSLATE_THROTTLE_MS) {
+            Log.v(TAG, "translate throttled — ${now - lastTranslateTime}ms since last")
+            return
+        }
 
-                        // 履歴に追加
+        lastTranslateTime = now
+        lastTranslatedText = text
+
+        Log.d(TAG, "translate request — \"$text\" (final=$isFinal)")
+        val translateStart = System.currentTimeMillis()
+
+        translator?.translate(text)
+            ?.addOnSuccessListener { translated ->
+                val translateMs = System.currentTimeMillis() - translateStart
+                Log.i(TAG, "translate done — \"$translated\" (${translateMs}ms)")
+                android.os.Handler(mainLooper).post {
+                    translatedTextView?.text = translated
+                    if (isFinal) {
                         subtitleHistory.add(text to translated)
                         if (subtitleHistory.size > 5) subtitleHistory.removeAt(0)
                         updateHistory()
                     }
                 }
-                ?.addOnFailureListener { e ->
-                    Log.e(TAG, "Translate failed", e)
-                }
-        }
+            }
+            ?.addOnFailureListener { e ->
+                Log.e(TAG, "translate FAILED", e)
+            }
     }
 
     private fun updateHistory() {
@@ -423,11 +486,19 @@ class LiveTranslateService : Service() {
         }
     }
 
+    private fun resetButtonColor(buttonBg: View) {
+        android.os.Handler(mainLooper).post {
+            (buttonBg.background as? android.graphics.drawable.GradientDrawable)
+                ?.setColor(Color.parseColor("#2196F3"))
+        }
+    }
+
     private fun stopEverything() {
         isCurrentlyListening = false
         speechRecognizer?.stopListening()
         speechRecognizer?.destroy()
         speechRecognizer = null
+        currentButtonBg = null
 
         subtitleView?.let { windowManager?.removeView(it) }
         subtitleView = null
@@ -459,5 +530,10 @@ class LiveTranslateService : Service() {
             description = "音声翻訳サービス通知"
         }
         getSystemService(NotificationManager::class.java).createNotificationChannel(channel)
+    }
+
+    private fun elapsed(start: Long): String {
+        val ms = System.currentTimeMillis() - start
+        return "${ms / 1000}.${(ms % 1000) / 100}s"
     }
 }
