@@ -30,19 +30,7 @@ class SafmnSuperResolution {
     private var initialized = false
 
     fun initialize(context: Context): Boolean {
-        if (initialized && SafmnBridge.nativeSafmnIsLoaded()) return true
-        return try {
-            val result = SafmnBridge.nativeSafmnInit(
-                context.assets, PARAM_FILE, MODEL_FILE, SCALE, TILE_SIZE
-            )
-            initialized = result
-            if (result) Log.i(TAG, "SAFMN++ initialized (Vulkan+FP16, tile=$TILE_SIZE)")
-            else Log.e(TAG, "SAFMN++ init failed")
-            result
-        } catch (e: Exception) {
-            Log.e(TAG, "SAFMN++ init error: ${e.message}")
-            false
-        }
+        return false  // 一時的に SAFMN 無効化 — Real-ESRGAN の動作確認用
     }
 
     suspend fun upscale(bitmap: Bitmap): Bitmap? {
