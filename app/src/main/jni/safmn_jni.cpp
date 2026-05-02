@@ -75,25 +75,16 @@ Java_com_nexus_vision_ncnn_SafmnBridge_nativeSafmnInit(
 
     g_safmn_net = new ncnn::Net();
 
-    int gpuCount = ncnn::get_gpu_count();
-    if (gpuCount > 0) {
-        g_safmn_useGpu = true;
-        g_safmn_net->opt.use_vulkan_compute = true;
-        g_safmn_net->opt.use_fp16_packed = true;
-        g_safmn_net->opt.use_fp16_storage = true;
-        g_safmn_net->opt.use_fp16_arithmetic = true;
-        g_safmn_net->opt.use_packing_layout = true;
-        g_safmn_net->opt.num_threads = 1;
-        LOGI_S("Vulkan GPU enabled, FP16=ON");
-    } else {
+    // Small モデル (0.5MB) は CPU で十分高速
+    {
         g_safmn_useGpu = false;
         g_safmn_net->opt.use_vulkan_compute = false;
-        g_safmn_net->opt.use_fp16_packed = true;
-        g_safmn_net->opt.use_fp16_storage = true;
+        g_safmn_net->opt.use_fp16_packed = false;
+        g_safmn_net->opt.use_fp16_storage = false;
         g_safmn_net->opt.use_fp16_arithmetic = false;
         g_safmn_net->opt.use_packing_layout = true;
-        g_safmn_net->opt.num_threads = 2;
-        LOGI_S("CPU fallback, FP16 storage");
+        g_safmn_net->opt.num_threads = 4;
+        LOGI_S("CPU mode, FP32, threads=4");
     }
 
     // param (テキスト)
@@ -200,15 +191,41 @@ Java_com_nexus_vision_ncnn_SafmnBridge_nativeSafmnProcess(
             }
 
             ncnn::Extractor ex = g_safmn_net->create_extractor();
+            // Vulkan disabled
+            /*
             if (g_safmn_useGpu) {
                 ex.set_blob_vkallocator(g_safmn_net->opt.blob_vkallocator);
                 ex.set_workspace_vkallocator(g_safmn_net->opt.workspace_vkallocator);
                 ex.set_staging_vkallocator(g_safmn_net->opt.staging_vkallocator);
             }
+            */
+
+            // 入力デバッグ（ex.input の直前に追加）
+            {
+                const float* dbgIn = in.channel(0);
+                float inMin = dbgIn[0], inMax = dbgIn[0];
+                for (int i = 1; i < in.w * in.h; i++) {
+                    if (dbgIn[i] < inMin) inMin = dbgIn[i];
+                    if (dbgIn[i] > inMax) inMax = dbgIn[i];
+                }
+                LOGI_S("Input range: min=%.4f, max=%.4f, w=%d, h=%d, c=%d",
+                       inMin, inMax, in.w, in.h, in.c);
+            }
 
             ex.input("in0", in);
             ncnn::Mat out;
             int ret = ex.extract("out0", out);
+
+            if (ret == 0) {
+                const float* dbg = out.channel(0);
+                float minVal = dbg[0], maxVal = dbg[0];
+                for (int i = 1; i < out.w * out.h; i++) {
+                    if (dbg[i] < minVal) minVal = dbg[i];
+                    if (dbg[i] > maxVal) maxVal = dbg[i];
+                }
+                LOGI_S("Output range: min=%.4f, max=%.4f, w=%d, h=%d, c=%d",
+                       minVal, maxVal, out.w, out.h, out.c);
+            }
 
             if (ret != 0) {
                 LOGE_S("Tile (%d,%d) failed: %d", xi, yi, ret);

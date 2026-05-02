@@ -50,9 +50,14 @@ class SafmnSuperResolution {
             Log.e(TAG, "SAFMN++ not loaded")
             return null
         }
-        // テスト: 常に direct パスを使用
-        Log.i(TAG, "Direct test (${bitmap.width}x${bitmap.height})")
-        return processDirect(bitmap)
+        val maxSide = maxOf(bitmap.width, bitmap.height)
+        return if (maxSide <= SR_MAX_INPUT) {
+            Log.i(TAG, "Small (${bitmap.width}x${bitmap.height}): direct 4x")
+            processDirect(bitmap)
+        } else {
+            Log.i(TAG, "Large (${bitmap.width}x${bitmap.height}): tiled")
+            processTiled(bitmap)
+        }
     }
 
     private fun processDirect(bitmap: Bitmap): Bitmap? {
