@@ -22,6 +22,10 @@ import com.nexus.vision.ui.theme.NexusVisionTheme
 import com.nexus.vision.engine.EngineState
 import com.nexus.vision.engine.NexusEngineManager
 import com.nexus.vision.notification.InlineReplyHandler
+import androidx.navigation.compose.NavHost
+import androidx.navigation.compose.composable
+import androidx.navigation.compose.rememberNavController
+import com.nexus.vision.audio.TunerScreen
 
 class MainActivity : ComponentActivity() {
 
@@ -87,18 +91,27 @@ class MainActivity : ComponentActivity() {
 
         setContent {
             NexusVisionTheme {
-                MainScreen(
-                    viewModel = mainViewModel,
-                    onPickImage = { launchImagePicker() },
-                    onPickFile = { launchFilePicker() },
-                    onPickMultipleImages = { launchMultipleImagePicker() },
-                    onImageSelected = { callback ->
-                        onImageSelected = callback
-                    },
-                    onMultipleImagesSelected = { callback ->
-                        onMultipleImagesSelected = callback
+                val navController = rememberNavController()
+                NavHost(navController = navController, startDestination = "main") {
+                    composable("main") {
+                        MainScreen(
+                            viewModel = mainViewModel,
+                            onPickImage = { launchImagePicker() },
+                            onPickFile = { launchFilePicker() },
+                            onPickMultipleImages = { launchMultipleImagePicker() },
+                            onNavigateToTuner = { navController.navigate("tuner") },
+                            onImageSelected = { callback ->
+                                onImageSelected = callback
+                            },
+                            onMultipleImagesSelected = { callback ->
+                                onMultipleImagesSelected = callback
+                            }
+                        )
                     }
-                )
+                    composable("tuner") {
+                        TunerScreen()
+                    }
+                }
             }
         }
     }

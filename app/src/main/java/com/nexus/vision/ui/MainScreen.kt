@@ -41,6 +41,8 @@ import android.widget.Toast
 import com.nexus.vision.ui.components.ChatBubble
 import com.nexus.vision.ui.components.ChatInput
 import com.nexus.vision.ui.components.CropSelector
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Tune
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -49,6 +51,7 @@ fun MainScreen(
     onPickImage: () -> Unit = {},
     onPickFile: () -> Unit = {},
     onPickMultipleImages: () -> Unit = {},
+    onNavigateToTuner: () -> Unit = {},
     onImageSelected: ((android.net.Uri) -> Unit) -> Unit = {},
     onMultipleImagesSelected: ((List<android.net.Uri>) -> Unit) -> Unit = {}
 ) {
@@ -89,6 +92,15 @@ fun MainScreen(
                         )
                         Spacer(modifier = Modifier.width(12.dp))
                         ThermalBadge(levelName = uiState.thermalLevelName)
+                    }
+                },
+                actions = {
+                    androidx.compose.material3.IconButton(onClick = onNavigateToTuner) {
+                        androidx.compose.material3.Icon(
+                            imageVector = Icons.Default.Tune,
+                            contentDescription = "チューナー",
+                            tint = MaterialTheme.colorScheme.onSurface
+                        )
                     }
                 },
                 colors = TopAppBarDefaults.topAppBarColors(
