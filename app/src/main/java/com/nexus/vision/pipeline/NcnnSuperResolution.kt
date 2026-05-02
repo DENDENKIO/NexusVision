@@ -6,6 +6,9 @@ import android.graphics.Canvas
 import android.graphics.Rect
 import android.util.Log
 import com.nexus.vision.ncnn.RealEsrganBridge
+import com.nexus.vision.ocr.MlKitOcrEngine
+import com.nexus.vision.ocr.OcrResult
+import kotlinx.coroutines.runBlocking
 import kotlin.math.ceil
 import kotlin.math.ln
 import kotlin.math.max
@@ -13,9 +16,11 @@ import kotlin.math.min
 import kotlin.math.sqrt
 
 /**
- * NCNN Real-ESRGAN 4× Super-Resolution with EASS 3-Route tile selection
+ * NCNN Real-ESRGAN 4× Super-Resolution with EASS 4-Route tile selection
+ *
  * Route A: 平坦タイル → バイキュービック（FECS < 1.5）
  * Route B: 文字/エッジ密集タイル → AI + バイキュービック ブレンド（高エッジ密度）
+ * Route T: テキスト検出タイル → バイキュービック + シャープ + ラプラシアンブレンド（文字保存）
  * Route C: 通常タイル → AI のみ
  */
 class NcnnSuperResolution {
@@ -36,10 +41,16 @@ class NcnnSuperResolution {
         private const val EDGE_THRESHOLD = 30
 
         // ── Route B パラメータ ──
-        // エッジ密度がこの値以上のタイルを「文字/エッジ密集」と判定
         private const val EDGE_DENSITY_THRESHOLD = 0.15f
-        // Route B でのバイキュービックのブレンド比率（0.0=AI100%, 1.0=バイキュービック100%）
         private const val TEXT_BLEND_RATIO = 0.35f
+
+        // ── Route T パラメータ ──
+        // テキストタイルでの AI 出力とバイキュービック＋シャープの合成比率
+        // AI の寄与を下げて文字保存を優先（AI 40%, テキスト保存 60%）
+        private const val TEXT_PRESERVE_RATIO = 0.60f
+        private const val TEXT_SHARPEN_STRENGTH = 0.6f
+        private const val TEXT_DETAIL_STRENGTH = 1.2f
+        private const val TEXT_SHARPEN_BLEND = 0.4f
 
         // ── NLM デノイズパラメータ ──
         private const val NOISE_ENTROPY_THRESHOLD = 6.5f
@@ -49,6 +60,7 @@ class NcnnSuperResolution {
     }
 
     private var initialized = false
+    private var ocrEngine: MlKitOcrEngine? = null
 
     fun initialize(context: Context): Boolean {
         if (initialized) return true
@@ -61,7 +73,8 @@ class NcnnSuperResolution {
             )
             if (success) {
                 initialized = true
-                Log.i(TAG, "Initialized NcnnSR (tile=$TILE_SIZE)")
+                ocrEngine = MlKitOcrEngine()
+                Log.i(TAG, "Initialized NcnnSR (tile=$TILE_SIZE, textDetect=ON)")
             } else {
                 Log.e(TAG, "nativeInit returned false")
             }
@@ -87,7 +100,54 @@ class NcnnSuperResolution {
     }
 
     // ════════════════════════════════════════
-    //  EASS 3-Route タイルパイプライン
+    //  テキスト領域検出（ML Kit OCR）
+    // ════════════════════════════════════════
+
+    /**
+     * 入力画像全体から文字領域の Rect リストを取得する。
+     * タイル座標との交差判定に使用。
+     */
+    private fun detectTextRegions(bitmap: Bitmap): List<Rect> {
+        val engine = ocrEngine ?: return emptyList()
+        return try {
+            val result = runBlocking {
+                engine.recognize(bitmap)
+            }
+            val rects = mutableListOf<Rect>()
+            for (block in result.blocks) {
+                for (line in block.lines) {
+                    line.boundingBox?.let { rects.add(it) }
+                }
+            }
+            Log.i(TAG, "TextDetect: ${rects.size} text lines found")
+            rects
+        } catch (e: Exception) {
+            Log.w(TAG, "TextDetect failed: ${e.message}")
+            emptyList()
+        }
+    }
+
+    /**
+     * タイル矩形がテキスト領域と重なっているか判定
+     */
+    private fun isTextTile(tileRect: Rect, textRects: List<Rect>): Boolean {
+        for (textRect in textRects) {
+            if (Rect.intersects(tileRect, textRect)) {
+                // テキスト領域がタイルの面積の 5% 以上を占めるか確認
+                val intersection = Rect()
+                intersection.setIntersect(tileRect, textRect)
+                val intersectArea = intersection.width() * intersection.height()
+                val tileArea = tileRect.width() * tileRect.height()
+                if (tileArea > 0 && intersectArea.toFloat() / tileArea > 0.05f) {
+                    return true
+                }
+            }
+        }
+        return false
+    }
+
+    // ════════════════════════════════════════
+    //  EASS 4-Route タイルパイプライン
     // ════════════════════════════════════════
 
     private fun processTiledEass(src: Bitmap): Bitmap? {
@@ -107,6 +167,12 @@ class NcnnSuperResolution {
         Log.i(TAG, "EASS Pipeline: ${srcW}x${srcH} -> ${outW}x${outH} " +
                 "(scale=${"%.2f".format(effectiveScale)})")
 
+        // ── テキスト領域を事前検出 ──
+        val textDetectStart = System.currentTimeMillis()
+        val textRects = detectTextRegions(src)
+        val textDetectMs = System.currentTimeMillis() - textDetectStart
+        Log.i(TAG, "TextDetect: ${textRects.size} regions in ${textDetectMs}ms")
+
         val step = PROCESS_TILE - PROCESS_OVERLAP
         val tilesX = ceil(srcW.toFloat() / step).toInt()
         val tilesY = ceil(srcH.toFloat() / step).toInt()
@@ -122,6 +188,7 @@ class NcnnSuperResolution {
         var successCount = 0
         var aiCount = 0
         var blendCount = 0
+        var textCount = 0
         var skipCount = 0
         var denoiseCount = 0
 
@@ -135,8 +202,8 @@ class NcnnSuperResolution {
                 if (tileW < 4 || tileH < 4) continue
 
                 val tile = Bitmap.createBitmap(src, srcX, srcY, tileW, tileH)
+                val tileRect = Rect(srcX, srcY, srcX + tileW, srcY + tileH)
 
-                // ── FECS スコア + エッジ密度計算 ──
                 val tileAnalysis = analyzeTile(tile)
                 val fecs = tileAnalysis.fecs
                 val edgeDensity = tileAnalysis.edgeDensity
@@ -147,52 +214,30 @@ class NcnnSuperResolution {
                 val dstH = (tileH * effectiveScale).toInt().coerceAtLeast(1)
                 val dstRect = Rect(dstX, dstY, dstX + dstW, dstY + dstH)
 
+                // ── ルーティング判定 ──
+                val hasText = textRects.isNotEmpty() && isTextTile(tileRect, textRects)
+
                 val resultTile: Bitmap? = if (fecs < FECS_THRESHOLD_LOW) {
                     // ── Route A: 平坦タイル → バイキュービック ──
                     skipCount++
                     Bitmap.createScaledBitmap(tile, dstW, dstH, true)
+
+                } else if (hasText) {
+                    // ── Route T: テキスト検出タイル → 文字保存パス ──
+                    textCount++
+                    aiCount++
+                    processTextPreserveTile(tile, dstW, dstH, tileAnalysis.entropy)
+
                 } else if (edgeDensity >= EDGE_DENSITY_THRESHOLD) {
-                    // ── Route B: 文字/エッジ密集 → AI + バイキュービック ブレンド ──
+                    // ── Route B: エッジ密集（テキストなし）→ AI + バイキュービック ブレンド ──
                     blendCount++
                     aiCount++
+                    processBlendTile(tile, dstW, dstH, tileAnalysis.entropy)
 
-                    val tileEntropy = tileAnalysis.entropy
-                    val inputTile = if (tileEntropy > NOISE_ENTROPY_THRESHOLD) {
-                        denoiseCount++
-                        val denoised = RealEsrganBridge.nativeNlmDenoise(
-                            ensureArgb(tile), NLM_STRENGTH, NLM_PATCH_SIZE, NLM_SEARCH_SIZE
-                        )
-                        denoised ?: tile
-                    } else {
-                        tile
-                    }
-
-                    val aiResult = processOneTileDirect(inputTile, dstW, dstH)
-                    val bicubicResult = Bitmap.createScaledBitmap(tile, dstW, dstH, true)
-
-                    if (aiResult != null) {
-                        val blended = blendBitmaps(aiResult, bicubicResult, TEXT_BLEND_RATIO)
-                        aiResult.recycle()
-                        bicubicResult.recycle()
-                        blended
-                    } else {
-                        bicubicResult
-                    }
                 } else {
                     // ── Route C: 通常タイル → AI のみ ──
                     aiCount++
-
-                    val tileEntropy = tileAnalysis.entropy
-                    val inputTile = if (tileEntropy > NOISE_ENTROPY_THRESHOLD) {
-                        denoiseCount++
-                        val denoised = RealEsrganBridge.nativeNlmDenoise(
-                            ensureArgb(tile), NLM_STRENGTH, NLM_PATCH_SIZE, NLM_SEARCH_SIZE
-                        )
-                        denoised ?: tile
-                    } else {
-                        tile
-                    }
-                    processOneTileDirect(inputTile, dstW, dstH)
+                    processAiOnlyTile(tile, dstW, dstH, tileAnalysis.entropy)
                 }
 
                 if (resultTile != null) {
@@ -205,7 +250,7 @@ class NcnnSuperResolution {
                 val done = ty * tilesX + tx + 1
                 if (done % 5 == 0 || done == totalTiles) {
                     Log.i(TAG, "Progress: $done/$totalTiles " +
-                            "(AI=$aiCount, blend=$blendCount, skip=$skipCount)")
+                            "(AI=$aiCount, text=$textCount, blend=$blendCount, skip=$skipCount)")
                 }
             }
         }
@@ -213,11 +258,107 @@ class NcnnSuperResolution {
         val elapsed = System.currentTimeMillis() - startTime
         Log.i(TAG, "EASS Done: ${outW}x${outH}, " +
                 "$successCount/$totalTiles tiles, " +
-                "AI=$aiCount (blend=$blendCount, denoise=$denoiseCount), " +
+                "AI=$aiCount (text=$textCount, blend=$blendCount, denoise=$denoiseCount), " +
                 "skip=$skipCount (${skipPercent(skipCount, totalTiles)}%), " +
                 "${elapsed}ms")
 
         return output
+    }
+
+    // ════════════════════════════════════════
+    //  Route T: テキスト保存パス
+    //  AI 出力 + バイキュービック拡大 → ラプラシアンブレンド
+    //  文字のエッジを元画像から保持し、AI の塗りつぶしを抑制
+    // ════════════════════════════════════════
+
+    private fun processTextPreserveTile(
+        tile: Bitmap, dstW: Int, dstH: Int, entropy: Float
+    ): Bitmap? {
+        // 1. バイキュービック拡大（文字構造を保持）
+        val bicubic = Bitmap.createScaledBitmap(tile, dstW, dstH, true)
+
+        // 2. バイキュービック結果にシャープネス適用（文字エッジ強調）
+        val sharpened = RealEsrganBridge.nativeSharpen(bicubic, TEXT_SHARPEN_STRENGTH)
+
+        // 3. AI 処理（デノイズ付き）
+        val inputTile = if (entropy > NOISE_ENTROPY_THRESHOLD) {
+            val denoised = RealEsrganBridge.nativeNlmDenoise(
+                ensureArgb(tile), NLM_STRENGTH, NLM_PATCH_SIZE, NLM_SEARCH_SIZE
+            )
+            denoised ?: tile
+        } else {
+            tile
+        }
+        val aiResult = processOneTileDirect(inputTile, dstW, dstH)
+
+        if (aiResult == null) {
+            // AI 失敗 → シャープ済みバイキュービックを返す
+            bicubic.recycle()
+            return sharpened ?: bicubic
+        }
+
+        // 4. ラプラシアンブレンド: シャープ済みバイキュービック(元画像)の高周波 + AI の低周波
+        val textSource = sharpened ?: bicubic
+        val blended = RealEsrganBridge.nativeLaplacianBlend(
+            textSource,      // original: 文字エッジの高周波ソース
+            aiResult,        // enhanced: AI の滑らかな低周波ソース
+            TEXT_DETAIL_STRENGTH,   // 元画像ディテール強度 1.2（文字エッジを強めに保持）
+            TEXT_SHARPEN_BLEND      // 仕上げシャープ 0.4
+        )
+
+        // クリーンアップ
+        bicubic.recycle()
+        if (sharpened != null && sharpened !== bicubic) sharpened.recycle()
+        aiResult.recycle()
+
+        return blended
+    }
+
+    // ════════════════════════════════════════
+    //  Route B: エッジ密集ブレンド
+    // ════════════════════════════════════════
+
+    private fun processBlendTile(
+        tile: Bitmap, dstW: Int, dstH: Int, entropy: Float
+    ): Bitmap? {
+        val inputTile = if (entropy > NOISE_ENTROPY_THRESHOLD) {
+            val denoised = RealEsrganBridge.nativeNlmDenoise(
+                ensureArgb(tile), NLM_STRENGTH, NLM_PATCH_SIZE, NLM_SEARCH_SIZE
+            )
+            denoised ?: tile
+        } else {
+            tile
+        }
+
+        val aiResult = processOneTileDirect(inputTile, dstW, dstH)
+        val bicubicResult = Bitmap.createScaledBitmap(tile, dstW, dstH, true)
+
+        if (aiResult != null) {
+            val blended = blendBitmaps(aiResult, bicubicResult, TEXT_BLEND_RATIO)
+            aiResult.recycle()
+            bicubicResult.recycle()
+            return blended
+        } else {
+            return bicubicResult
+        }
+    }
+
+    // ════════════════════════════════════════
+    //  Route C: AI のみ
+    // ════════════════════════════════════════
+
+    private fun processAiOnlyTile(
+        tile: Bitmap, dstW: Int, dstH: Int, entropy: Float
+    ): Bitmap? {
+        val inputTile = if (entropy > NOISE_ENTROPY_THRESHOLD) {
+            val denoised = RealEsrganBridge.nativeNlmDenoise(
+                ensureArgb(tile), NLM_STRENGTH, NLM_PATCH_SIZE, NLM_SEARCH_SIZE
+            )
+            denoised ?: tile
+        } else {
+            tile
+        }
+        return processOneTileDirect(inputTile, dstW, dstH)
     }
 
     // ════════════════════════════════════════
@@ -245,7 +386,6 @@ class NcnnSuperResolution {
             gray[i] = (0.299f * r + 0.587f * g + 0.114f * b).toInt()
         }
 
-        // ── シャノンエントロピー H ──
         val hist = IntArray(256)
         for (v in gray) hist[v]++
         val total = gray.size.toFloat()
@@ -257,7 +397,6 @@ class NcnnSuperResolution {
             }
         }
 
-        // ── Sobel エッジ強度分布 + エッジ密度 ──
         var eLow = 0
         var eMid = 0
         var eHigh = 0
@@ -286,7 +425,6 @@ class NcnnSuperResolution {
                     else -> eHigh++
                 }
 
-                // 文字検出用：中〜高エッジをカウント
                 if (mag >= EDGE_THRESHOLD) {
                     edgePixels++
                 }
@@ -357,10 +495,6 @@ class NcnnSuperResolution {
         }
     }
 
-    // ════════════════════════════════════════
-    //  小画像用ダイレクト処理
-    // ════════════════════════════════════════
-
     private fun processSuperResolution(bitmap: Bitmap): Bitmap? {
         val input = limitSize(ensureArgb(bitmap))
         return RealEsrganBridge.nativeProcess(input)
@@ -393,6 +527,8 @@ class NcnnSuperResolution {
     fun release() {
         if (initialized) {
             RealEsrganBridge.nativeRelease()
+            ocrEngine?.close()
+            ocrEngine = null
             initialized = false
             Log.i(TAG, "Released NcnnSR")
         }
