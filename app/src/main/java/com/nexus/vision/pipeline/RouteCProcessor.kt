@@ -3,7 +3,6 @@ package com.nexus.vision.pipeline
 import android.content.Context
 import android.graphics.Bitmap
 import android.util.Log
-import com.nexus.vision.ncnn.NcnnSuperResolution
 import com.nexus.vision.ncnn.SafmnSuperResolution
 
 /**

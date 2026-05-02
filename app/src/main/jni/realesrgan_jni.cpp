@@ -43,9 +43,8 @@ extern "C" {
 JNIEXPORT jboolean JNICALL
 Java_com_nexus_vision_ncnn_RealEsrganBridge_nativeInit(
     JNIEnv* env, jclass clazz,
-    jobject assetManager,
-    jstring paramPath,
-    jstring modelPath,
+    jbyteArray paramData,
+    jbyteArray modelData,
     jint scale,
     jint tileSize) {
 
@@ -57,23 +56,18 @@ Java_com_nexus_vision_ncnn_RealEsrganBridge_nativeInit(
         g_realesrgan = nullptr;
     }
 
-    const char* paramStr = env->GetStringUTFChars(paramPath, nullptr);
-    const char* modelStr = env->GetStringUTFChars(modelPath, nullptr);
+    jsize paramLen = env->GetArrayLength(paramData);
+    std::vector<unsigned char> paramBuf(paramLen);
+    env->GetByteArrayRegion(paramData, 0, paramLen, (jbyte*)paramBuf.data());
 
-    LOGI("Init: param=%s, model=%s, scale=%d, tile=%d", paramStr, modelStr, scale, tileSize);
+    jsize modelLen = env->GetArrayLength(modelData);
+    std::vector<unsigned char> modelBuf(modelLen);
+    env->GetByteArrayRegion(modelData, 0, modelLen, (jbyte*)modelBuf.data());
 
-    std::vector<unsigned char> paramBuf = loadAsset(env, assetManager, paramStr);
-    std::vector<unsigned char> modelBuf = loadAsset(env, assetManager, modelStr);
+    LOGI("Init from memory: param=%d bytes, model=%d bytes, scale=%d, tile=%d", 
+         paramLen, modelLen, scale, tileSize);
 
-    env->ReleaseStringUTFChars(paramPath, paramStr);
-    env->ReleaseStringUTFChars(modelPath, modelStr);
-
-    if (paramBuf.empty() || modelBuf.empty()) {
-        LOGE("Failed to load model files from assets");
-        return JNI_FALSE;
-    }
-
-    // GPU自動検出（0=first GPU, -1にすると内部でauto）
+    // GPU自動検出（0=first GPU）
     g_realesrgan = new RealESRGANSimple(0);
     g_realesrgan->scale = scale;
     g_realesrgan->tileSize = tileSize;
@@ -88,7 +82,7 @@ Java_com_nexus_vision_ncnn_RealEsrganBridge_nativeInit(
         return JNI_FALSE;
     }
 
-    LOGI("RealESRGAN initialized (Vulkan GPU + FP16)");
+    LOGI("RealESRGAN initialized from memory (Vulkan GPU + FP16)");
     return JNI_TRUE;
 }
 

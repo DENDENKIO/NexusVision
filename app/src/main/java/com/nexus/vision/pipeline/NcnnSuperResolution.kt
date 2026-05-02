@@ -1,18 +1,22 @@
-package com.nexus.vision.ncnn
+package com.nexus.vision.pipeline
 
 import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.Canvas
 import android.graphics.Rect
 import android.util.Log
+import com.nexus.vision.ncnn.RealEsrganBridge
 import kotlin.math.ceil
 import kotlin.math.ln
 import kotlin.math.max
 import kotlin.math.min
+import kotlin.math.sqrt
 
 /**
- * NCNN Real-ESRGAN 4× Super-Resolution with EASS tile selection
- * Phase 14 optimized: Fusion OFF, TILE_SIZE=128, EASS/FECS routing
+ * NCNN Real-ESRGAN 4× Super-Resolution with EASS 3-Route tile selection
+ * Route A: 平坦タイル → バイキュービック（FECS < 1.5）
+ * Route B: 文字/エッジ密集タイル → AI + バイキュービック ブレンド（高エッジ密度）
+ * Route C: 通常タイル → AI のみ
  */
 class NcnnSuperResolution {
 
@@ -28,13 +32,16 @@ class NcnnSuperResolution {
         private const val MAX_OUTPUT_SIDE = 4096
 
         // ── EASS/FECS パラメータ ──
-        // FECS スコアがこの値未満のタイルは平坦と判定し、AI をスキップ
         private const val FECS_THRESHOLD_LOW = 1.5f
-        // エッジ画素の割合（Sobel 閾値超え）
         private const val EDGE_THRESHOLD = 30
 
+        // ── Route B パラメータ ──
+        // エッジ密度がこの値以上のタイルを「文字/エッジ密集」と判定
+        private const val EDGE_DENSITY_THRESHOLD = 0.15f
+        // Route B でのバイキュービックのブレンド比率（0.0=AI100%, 1.0=バイキュービック100%）
+        private const val TEXT_BLEND_RATIO = 0.35f
+
         // ── NLM デノイズパラメータ ──
-        // FECS がこの値以上、かつエントロピーが高い場合にデノイズ適用
         private const val NOISE_ENTROPY_THRESHOLD = 6.5f
         private const val NLM_STRENGTH = 15.0f
         private const val NLM_PATCH_SIZE = 3
@@ -44,11 +51,13 @@ class NcnnSuperResolution {
     private var initialized = false
 
     fun initialize(context: Context): Boolean {
-        if (initialized && RealEsrganBridge.nativeIsLoaded()) return true
+        if (initialized) return true
         return try {
-            // NOTE: Keep using AssetManager-based nativeInit to match existing JNI signature
+            val assetManager = context.assets
+            val paramData = assetManager.open(PARAM_FILE).use { it.readBytes() }
+            val modelData = assetManager.open(MODEL_FILE).use { it.readBytes() }
             val success = RealEsrganBridge.nativeInit(
-                context.assets, PARAM_FILE, MODEL_FILE, SCALE, TILE_SIZE
+                paramData, modelData, SCALE, TILE_SIZE
             )
             if (success) {
                 initialized = true
@@ -78,14 +87,13 @@ class NcnnSuperResolution {
     }
 
     // ════════════════════════════════════════
-    //  EASS タイルパイプライン
+    //  EASS 3-Route タイルパイプライン
     // ════════════════════════════════════════
 
     private fun processTiledEass(src: Bitmap): Bitmap? {
         val srcW = src.width
         val srcH = src.height
 
-        // 出力サイズ計算（MAX_OUTPUT_SIDE 制限）
         val rawOutW = srcW * SCALE
         val rawOutH = srcH * SCALE
         val maxSide = max(rawOutW, rawOutH)
@@ -97,7 +105,7 @@ class NcnnSuperResolution {
         val effectiveScale = outW.toFloat() / srcW
 
         Log.i(TAG, "EASS Pipeline: ${srcW}x${srcH} -> ${outW}x${outH} " +
-                "(scale=${String.format("%.2f", effectiveScale)})")
+                "(scale=${"%.2f".format(effectiveScale)})")
 
         val step = PROCESS_TILE - PROCESS_OVERLAP
         val tilesX = ceil(srcW.toFloat() / step).toInt()
@@ -105,7 +113,7 @@ class NcnnSuperResolution {
         val totalTiles = tilesX * tilesY
 
         Log.i(TAG, "Tiles: ${tilesX}x${tilesY} = $totalTiles " +
-                "(tile=$PROCESS_TILE, step=$step, FECS_threshold=$FECS_THRESHOLD_LOW)")
+                "(tile=$PROCESS_TILE, step=$step)")
 
         val output = Bitmap.createBitmap(outW, outH, Bitmap.Config.ARGB_8888)
         val canvas = Canvas(output)
@@ -113,6 +121,7 @@ class NcnnSuperResolution {
 
         var successCount = 0
         var aiCount = 0
+        var blendCount = 0
         var skipCount = 0
         var denoiseCount = 0
 
@@ -125,13 +134,13 @@ class NcnnSuperResolution {
 
                 if (tileW < 4 || tileH < 4) continue
 
-                // タイル切り出し
                 val tile = Bitmap.createBitmap(src, srcX, srcY, tileW, tileH)
 
-                // ── FECS スコア計算 ──
-                val fecs = calculateFecs(tile)
+                // ── FECS スコア + エッジ密度計算 ──
+                val tileAnalysis = analyzeTile(tile)
+                val fecs = tileAnalysis.fecs
+                val edgeDensity = tileAnalysis.edgeDensity
 
-                // 出力領域
                 val dstX = (srcX * effectiveScale).toInt()
                 val dstY = (srcY * effectiveScale).toInt()
                 val dstW = (tileW * effectiveScale).toInt().coerceAtLeast(1)
@@ -142,15 +151,40 @@ class NcnnSuperResolution {
                     // ── Route A: 平坦タイル → バイキュービック ──
                     skipCount++
                     Bitmap.createScaledBitmap(tile, dstW, dstH, true)
-                } else {
-                    // ── Route C: 高情報タイル → AI (Real-ESRGAN) ──
+                } else if (edgeDensity >= EDGE_DENSITY_THRESHOLD) {
+                    // ── Route B: 文字/エッジ密集 → AI + バイキュービック ブレンド ──
+                    blendCount++
                     aiCount++
 
-                    // ノイズ判定：エントロピーが高すぎる場合はデノイズ前処理
-                    val tileEntropy = calculateEntropy(tile)
+                    val tileEntropy = tileAnalysis.entropy
                     val inputTile = if (tileEntropy > NOISE_ENTROPY_THRESHOLD) {
                         denoiseCount++
-                        Log.d(TAG, "Tile($tx,$ty) high noise: entropy=${"%.2f".format(tileEntropy)}, applying NLM")
+                        val denoised = RealEsrganBridge.nativeNlmDenoise(
+                            ensureArgb(tile), NLM_STRENGTH, NLM_PATCH_SIZE, NLM_SEARCH_SIZE
+                        )
+                        denoised ?: tile
+                    } else {
+                        tile
+                    }
+
+                    val aiResult = processOneTileDirect(inputTile, dstW, dstH)
+                    val bicubicResult = Bitmap.createScaledBitmap(tile, dstW, dstH, true)
+
+                    if (aiResult != null) {
+                        val blended = blendBitmaps(aiResult, bicubicResult, TEXT_BLEND_RATIO)
+                        aiResult.recycle()
+                        bicubicResult.recycle()
+                        blended
+                    } else {
+                        bicubicResult
+                    }
+                } else {
+                    // ── Route C: 通常タイル → AI のみ ──
+                    aiCount++
+
+                    val tileEntropy = tileAnalysis.entropy
+                    val inputTile = if (tileEntropy > NOISE_ENTROPY_THRESHOLD) {
+                        denoiseCount++
                         val denoised = RealEsrganBridge.nativeNlmDenoise(
                             ensureArgb(tile), NLM_STRENGTH, NLM_PATCH_SIZE, NLM_SEARCH_SIZE
                         )
@@ -168,11 +202,10 @@ class NcnnSuperResolution {
                 }
                 tile.recycle()
 
-                // 進捗ログ（5タイルごと）
                 val done = ty * tilesX + tx + 1
                 if (done % 5 == 0 || done == totalTiles) {
                     Log.i(TAG, "Progress: $done/$totalTiles " +
-                            "(AI=$aiCount, skip=$skipCount)")
+                            "(AI=$aiCount, blend=$blendCount, skip=$skipCount)")
                 }
             }
         }
@@ -180,24 +213,29 @@ class NcnnSuperResolution {
         val elapsed = System.currentTimeMillis() - startTime
         Log.i(TAG, "EASS Done: ${outW}x${outH}, " +
                 "$successCount/$totalTiles tiles, " +
-                "AI=$aiCount (denoise=$denoiseCount), skip=$skipCount (${skipPercent(skipCount, totalTiles)}%), " +
+                "AI=$aiCount (blend=$blendCount, denoise=$denoiseCount), " +
+                "skip=$skipCount (${skipPercent(skipCount, totalTiles)}%), " +
                 "${elapsed}ms")
 
         return output
     }
 
     // ════════════════════════════════════════
-    //  FECS スコア計算
-    //  FECS = H × (E_mid + 2 × E_high) / (1 + E_low)
+    //  タイル分析（FECS + エッジ密度）
     // ════════════════════════════════════════
 
-    private fun calculateFecs(tile: Bitmap): Float {
+    data class TileAnalysis(
+        val fecs: Float,
+        val edgeDensity: Float,
+        val entropy: Float
+    )
+
+    private fun analyzeTile(tile: Bitmap): TileAnalysis {
         val w = tile.width
         val h = tile.height
         val pixels = IntArray(w * h)
         tile.getPixels(pixels, 0, w, 0, 0, w, h)
 
-        // グレースケール輝度
         val gray = IntArray(w * h)
         for (i in pixels.indices) {
             val p = pixels[i]
@@ -219,10 +257,13 @@ class NcnnSuperResolution {
             }
         }
 
-        // ── Sobel エッジ強度分布 ──
+        // ── Sobel エッジ強度分布 + エッジ密度 ──
         var eLow = 0
         var eMid = 0
         var eHigh = 0
+        var edgePixels = 0
+        val innerPixels = (w - 2) * (h - 2)
+
         for (y in 1 until h - 1) {
             for (x in 1 until w - 1) {
                 val gx = -gray[(y - 1) * w + (x - 1)] +
@@ -237,44 +278,65 @@ class NcnnSuperResolution {
                         gray[(y + 1) * w + (x - 1)] +
                         2 * gray[(y + 1) * w + x] +
                         gray[(y + 1) * w + (x + 1)]
-                val mag = kotlin.math.sqrt((gx * gx + gy * gy).toFloat()).toInt()
+                val mag = sqrt((gx * gx + gy * gy).toFloat()).toInt()
 
                 when {
                     mag < EDGE_THRESHOLD -> eLow++
                     mag < EDGE_THRESHOLD * 3 -> eMid++
                     else -> eHigh++
                 }
+
+                // 文字検出用：中〜高エッジをカウント
+                if (mag >= EDGE_THRESHOLD) {
+                    edgePixels++
+                }
             }
         }
 
-        // FECS = H × (E_mid + 2 × E_high) / (1 + E_low)
         val fecs = entropy * (eMid + 2f * eHigh) / (1f + eLow)
-        return fecs
+        val edgeDensity = if (innerPixels > 0) edgePixels.toFloat() / innerPixels else 0f
+
+        return TileAnalysis(fecs, edgeDensity, entropy)
     }
 
-    private fun calculateEntropy(tile: Bitmap): Float {
-        val w = tile.width
-        val h = tile.height
-        val pixels = IntArray(w * h)
-        tile.getPixels(pixels, 0, w, 0, 0, w, h)
+    // ════════════════════════════════════════
+    //  ビットマップブレンド（Route B）
+    // ════════════════════════════════════════
 
-        val hist = IntArray(256)
-        for (p in pixels) {
-            val r = (p shr 16) and 0xFF
-            val g = (p shr 8) and 0xFF
-            val b = p and 0xFF
-            val gray = (0.299f * r + 0.587f * g + 0.114f * b).toInt()
-            hist[gray]++
+    private fun blendBitmaps(ai: Bitmap, bicubic: Bitmap, bicubicRatio: Float): Bitmap {
+        val w = ai.width
+        val h = ai.height
+        val aiRatio = 1f - bicubicRatio
+
+        val aiPixels = IntArray(w * h)
+        val bicPixels = IntArray(w * h)
+        ai.getPixels(aiPixels, 0, w, 0, 0, w, h)
+        bicubic.getPixels(bicPixels, 0, w, 0, 0, w, h)
+
+        val outPixels = IntArray(w * h)
+
+        for (i in 0 until w * h) {
+            val ap = aiPixels[i]
+            val bp = bicPixels[i]
+
+            val aR = (ap shr 16) and 0xFF
+            val aG = (ap shr 8) and 0xFF
+            val aB = ap and 0xFF
+
+            val bR = (bp shr 16) and 0xFF
+            val bG = (bp shr 8) and 0xFF
+            val bB = bp and 0xFF
+
+            val oR = (aR * aiRatio + bR * bicubicRatio).toInt().coerceIn(0, 255)
+            val oG = (aG * aiRatio + bG * bicubicRatio).toInt().coerceIn(0, 255)
+            val oB = (aB * aiRatio + bB * bicubicRatio).toInt().coerceIn(0, 255)
+
+            outPixels[i] = (0xFF shl 24) or (oR shl 16) or (oG shl 8) or oB
         }
-        val total = pixels.size.toFloat()
-        var entropy = 0f
-        for (count in hist) {
-            if (count > 0) {
-                val prob = count / total
-                entropy -= prob * (ln(prob.toDouble()) / ln(2.0)).toFloat()
-            }
-        }
-        return entropy
+
+        val result = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
+        result.setPixels(outPixels, 0, w, 0, 0, w, h)
+        return result
     }
 
     // ════════════════════════════════════════
@@ -286,7 +348,6 @@ class NcnnSuperResolution {
     ): Bitmap? {
         val input = limitSize(ensureArgb(tile))
         val aiResult = RealEsrganBridge.nativeProcess(input) ?: return null
-        // ターゲットサイズにリサイズ
         return if (aiResult.width != targetW || aiResult.height != targetH) {
             val scaled = Bitmap.createScaledBitmap(aiResult, targetW, targetH, true)
             aiResult.recycle()

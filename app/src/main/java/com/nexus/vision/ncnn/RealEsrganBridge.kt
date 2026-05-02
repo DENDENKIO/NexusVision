@@ -11,9 +11,8 @@ object RealEsrganBridge {
     }
 
     external fun nativeInit(
-        assetManager: AssetManager,
-        paramPath: String,
-        modelPath: String,
+        paramData: ByteArray,
+        modelData: ByteArray,
         scale: Int,
         tileSize: Int
     ): Boolean
