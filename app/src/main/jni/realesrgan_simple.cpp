@@ -231,6 +231,71 @@ int RealESRGANSimple::process(const unsigned char* inputPixels, int w, int h,
     return 0;
 }
 
+int RealESRGANSimple::nlmDenoise(const unsigned char* inputPixels, int w, int h,
+                                  unsigned char* outputPixels,
+                                  float strength, int patchSize, int searchSize) {
+    LOGI("NLM Denoise: %dx%d, strength=%.1f, patch=%d, search=%d",
+         w, h, strength, patchSize, searchSize);
+    
+    const int halfPatch = patchSize / 2;
+    const int halfSearch = searchSize / 2;
+    const float h2 = strength * strength;
+    
+    // エッジ1行分はコピー
+    memcpy(outputPixels, inputPixels, (size_t)w * h * 4);
+    
+    for (int y = halfSearch + halfPatch; y < h - halfSearch - halfPatch; y++) {
+        for (int x = halfSearch + halfPatch; x < w - halfSearch - halfPatch; x++) {
+            
+            float weightSum = 0.0f;
+            float sumR = 0.0f, sumG = 0.0f, sumB = 0.0f;
+            
+            for (int sy = -halfSearch; sy <= halfSearch; sy++) {
+                for (int sx = -halfSearch; sx <= halfSearch; sx++) {
+                    int nx = x + sx;
+                    int ny = y + sy;
+                    
+                    // パッチ間距離（SSD）
+                    float dist = 0.0f;
+                    for (int py = -halfPatch; py <= halfPatch; py++) {
+                        for (int px = -halfPatch; px <= halfPatch; px++) {
+                            int idx1 = ((y + py) * w + (x + px)) * 4;
+                            int idx2 = ((ny + py) * w + (nx + px)) * 4;
+                            for (int c = 0; c < 3; c++) {
+                                float diff = (float)inputPixels[idx1 + c] -
+                                             (float)inputPixels[idx2 + c];
+                                dist += diff * diff;
+                            }
+                        }
+                    }
+                    
+                    int patchArea = patchSize * patchSize * 3;
+                    dist /= patchArea;
+                    
+                    float weight = expf(-dist / h2);
+                    weightSum += weight;
+                    
+                    int srcIdx = (ny * w + nx) * 4;
+                    sumR += weight * inputPixels[srcIdx + 0];
+                    sumG += weight * inputPixels[srcIdx + 1];
+                    sumB += weight * inputPixels[srcIdx + 2];
+                }
+            }
+            
+            int dstIdx = (y * w + x) * 4;
+            if (weightSum > 0.0f) {
+                outputPixels[dstIdx + 0] = (unsigned char)(sumR / weightSum + 0.5f);
+                outputPixels[dstIdx + 1] = (unsigned char)(sumG / weightSum + 0.5f);
+                outputPixels[dstIdx + 2] = (unsigned char)(sumB / weightSum + 0.5f);
+            }
+            outputPixels[dstIdx + 3] = inputPixels[dstIdx + 3]; // Alpha
+        }
+    }
+    
+    LOGI("NLM Denoise complete: %dx%d", w, h);
+    return 0;
+}
+
 int RealESRGANSimple::sharpen(const unsigned char* inputPixels, int w, int h,
                                unsigned char* outputPixels, float strength) {
     LOGI("Sharpen: %dx%d, strength=%.2f", w, h, strength);

@@ -32,6 +32,14 @@ public:
                               float detailStrength,
                               float sharpenStrength);
 
+    // NLM (Non-Local Means) デノイズ
+    // strength: デノイズ強度（10.0〜30.0推奨、大きいほど強い）
+    // patchSize: パッチサイズ（3 or 5推奨）
+    // searchSize: 探索窓サイズ（7〜13推奨）
+    static int nlmDenoise(const unsigned char* inputPixels, int w, int h,
+                          unsigned char* outputPixels,
+                          float strength, int patchSize, int searchSize);
+
     bool isLoaded() const { return loaded; }
 
     int scale = 4;

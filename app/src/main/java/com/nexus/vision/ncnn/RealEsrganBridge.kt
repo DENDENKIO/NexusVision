@@ -21,6 +21,14 @@ object RealEsrganBridge {
     external fun nativeProcess(inputBitmap: Bitmap): Bitmap?
 
     external fun nativeSharpen(inputBitmap: Bitmap, strength: Float): Bitmap?
+    
+    // NLM デノイズ
+    external fun nativeNlmDenoise(
+        inputBitmap: Bitmap,
+        strength: Float,      // 10.0〜30.0
+        patchSize: Int,        // 3 or 5
+        searchSize: Int        // 7〜13
+    ): Bitmap?
 
     // ラプラシアンピラミッド合成
     external fun nativeLaplacianBlend(

@@ -32,6 +32,13 @@ class NcnnSuperResolution {
         private const val FECS_THRESHOLD_LOW = 1.5f
         // エッジ画素の割合（Sobel 閾値超え）
         private const val EDGE_THRESHOLD = 30
+
+        // ── NLM デノイズパラメータ ──
+        // FECS がこの値以上、かつエントロピーが高い場合にデノイズ適用
+        private const val NOISE_ENTROPY_THRESHOLD = 6.5f
+        private const val NLM_STRENGTH = 15.0f
+        private const val NLM_PATCH_SIZE = 3
+        private const val NLM_SEARCH_SIZE = 7
     }
 
     private var initialized = false
@@ -107,6 +114,7 @@ class NcnnSuperResolution {
         var successCount = 0
         var aiCount = 0
         var skipCount = 0
+        var denoiseCount = 0
 
         for (ty in 0 until tilesY) {
             for (tx in 0 until tilesX) {
@@ -137,7 +145,20 @@ class NcnnSuperResolution {
                 } else {
                     // ── Route C: 高情報タイル → AI (Real-ESRGAN) ──
                     aiCount++
-                    processOneTileDirect(tile, dstW, dstH)
+
+                    // ノイズ判定：エントロピーが高すぎる場合はデノイズ前処理
+                    val tileEntropy = calculateEntropy(tile)
+                    val inputTile = if (tileEntropy > NOISE_ENTROPY_THRESHOLD) {
+                        denoiseCount++
+                        Log.d(TAG, "Tile($tx,$ty) high noise: entropy=${"%.2f".format(tileEntropy)}, applying NLM")
+                        val denoised = RealEsrganBridge.nativeNlmDenoise(
+                            ensureArgb(tile), NLM_STRENGTH, NLM_PATCH_SIZE, NLM_SEARCH_SIZE
+                        )
+                        denoised ?: tile
+                    } else {
+                        tile
+                    }
+                    processOneTileDirect(inputTile, dstW, dstH)
                 }
 
                 if (resultTile != null) {
@@ -159,7 +180,7 @@ class NcnnSuperResolution {
         val elapsed = System.currentTimeMillis() - startTime
         Log.i(TAG, "EASS Done: ${outW}x${outH}, " +
                 "$successCount/$totalTiles tiles, " +
-                "AI=$aiCount, skip=$skipCount (${skipPercent(skipCount, totalTiles)}%), " +
+                "AI=$aiCount (denoise=$denoiseCount), skip=$skipCount (${skipPercent(skipCount, totalTiles)}%), " +
                 "${elapsed}ms")
 
         return output
@@ -229,6 +250,31 @@ class NcnnSuperResolution {
         // FECS = H × (E_mid + 2 × E_high) / (1 + E_low)
         val fecs = entropy * (eMid + 2f * eHigh) / (1f + eLow)
         return fecs
+    }
+
+    private fun calculateEntropy(tile: Bitmap): Float {
+        val w = tile.width
+        val h = tile.height
+        val pixels = IntArray(w * h)
+        tile.getPixels(pixels, 0, w, 0, 0, w, h)
+
+        val hist = IntArray(256)
+        for (p in pixels) {
+            val r = (p shr 16) and 0xFF
+            val g = (p shr 8) and 0xFF
+            val b = p and 0xFF
+            val gray = (0.299f * r + 0.587f * g + 0.114f * b).toInt()
+            hist[gray]++
+        }
+        val total = pixels.size.toFloat()
+        var entropy = 0f
+        for (count in hist) {
+            if (count > 0) {
+                val prob = count / total
+                entropy -= prob * (ln(prob.toDouble()) / ln(2.0)).toFloat()
+            }
+        }
+        return entropy
     }
 
     // ════════════════════════════════════════
