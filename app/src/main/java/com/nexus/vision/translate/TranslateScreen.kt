@@ -1,6 +1,7 @@
 package com.nexus.vision.translate
 
 import android.Manifest
+import android.content.Context
 import android.content.Intent
 import android.provider.Settings
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -26,6 +27,7 @@ fun TranslateScreen() {
     var isRunning by remember { mutableStateOf(false) }
     var selectedSource by remember { mutableStateOf("en") }
     var selectedTarget by remember { mutableStateOf("ja") }
+    var pendingStart by remember { mutableStateOf(false) }
 
     val languages = listOf(
         "en" to "English",
@@ -49,7 +51,14 @@ fun TranslateScreen() {
 
     val permissionLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestPermission()
-    ) { granted -> hasAudioPermission = granted }
+    ) { granted ->
+        hasAudioPermission = granted
+        if (granted && pendingStart) {
+            pendingStart = false
+            startTranslateService(context, selectedSource, selectedTarget)
+            isRunning = true
+        }
+    }
 
     Column(
         modifier = Modifier
@@ -124,7 +133,7 @@ fun TranslateScreen() {
                     )
                     isRunning = false
                 } else {
-                    // オーバーレイ権限チェック
+                    // 1. オーバーレイ権限チェック
                     if (!Settings.canDrawOverlays(context)) {
                         val overlayIntent = Intent(
                             Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
@@ -133,18 +142,16 @@ fun TranslateScreen() {
                         context.startActivity(overlayIntent)
                         return@Button
                     }
-                    // マイク権限チェック
-                    if (!hasAudioPermission) {
+                    // 2. RECORD_AUDIO 権限チェック（これがないとサービス起動でクラッシュ）
+                    if (ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO)
+                        != android.content.pm.PackageManager.PERMISSION_GRANTED
+                    ) {
+                        pendingStart = true
                         permissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
                         return@Button
                     }
-                    // 開始
-                    val serviceIntent = Intent(context, LiveTranslateService::class.java).apply {
-                        action = LiveTranslateService.ACTION_START
-                        putExtra(LiveTranslateService.EXTRA_SOURCE_LANG, selectedSource)
-                        putExtra(LiveTranslateService.EXTRA_TARGET_LANG, selectedTarget)
-                    }
-                    context.startForegroundService(serviceIntent)
+                    // 3. 権限OK → サービス開始
+                    startTranslateService(context, selectedSource, selectedTarget)
                     isRunning = true
                 }
             },
@@ -190,4 +197,13 @@ private fun LanguageSelector(
             )
         }
     }
+}
+
+private fun startTranslateService(context: Context, source: String, target: String) {
+    val serviceIntent = Intent(context, LiveTranslateService::class.java).apply {
+        action = LiveTranslateService.ACTION_START
+        putExtra(LiveTranslateService.EXTRA_SOURCE_LANG, source)
+        putExtra(LiveTranslateService.EXTRA_TARGET_LANG, target)
+    }
+    context.startForegroundService(serviceIntent)
 }
