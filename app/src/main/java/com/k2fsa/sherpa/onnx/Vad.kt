@@ -4,20 +4,20 @@ import android.content.res.AssetManager
 
 data class SileroVadModelConfig(
     var model: String = "",
-    var threshold: Float = 0.5f,
-    var minSilenceDuration: Float = 0.25f,
-    var minSpeechDuration: Float = 0.25f,
+    var threshold: Float = 0.5F,
+    var minSilenceDuration: Float = 0.25F,
+    var minSpeechDuration: Float = 0.25F,
     var windowSize: Int = 512,
-    var maxSpeechDuration: Float = 5.0f,
+    var maxSpeechDuration: Float = 5.0F,
 )
 
 data class TenVadModelConfig(
     var model: String = "",
-    var threshold: Float = 0.5f,
-    var minSilenceDuration: Float = 0.25f,
-    var minSpeechDuration: Float = 0.25f,
+    var threshold: Float = 0.5F,
+    var minSilenceDuration: Float = 0.25F,
+    var minSpeechDuration: Float = 0.25F,
     var windowSize: Int = 256,
-    var maxSpeechDuration: Float = 5.0f,
+    var maxSpeechDuration: Float = 5.0F,
 )
 
 data class VadModelConfig(
@@ -38,10 +38,10 @@ class Vad(
     private var ptr: Long
 
     init {
-        ptr = if (assetManager != null) {
-            newFromAsset(assetManager, config)
+        if (assetManager != null) {
+            ptr = newFromAsset(assetManager, config)
         } else {
-            newFromFile(config)
+            ptr = newFromFile(config)
         }
     }
 
@@ -54,19 +54,39 @@ class Vad(
 
     fun release() = finalize()
 
+    fun compute(samples: FloatArray): Float = compute(ptr, samples)
+
     fun acceptWaveform(samples: FloatArray) = acceptWaveform(ptr, samples)
+
     fun empty(): Boolean = empty(ptr)
-    fun front(): SpeechSegment = front(ptr)
     fun pop() = pop(ptr)
+
+    fun front(): SpeechSegment {
+        return front(ptr)
+    }
+
     fun clear() = clear(ptr)
+
     fun isSpeechDetected(): Boolean = isSpeechDetected(ptr)
+
     fun reset() = reset(ptr)
+
     fun flush() = flush(ptr)
 
     private external fun delete(ptr: Long)
-    private external fun newFromAsset(assetManager: AssetManager, config: VadModelConfig): Long
-    private external fun newFromFile(config: VadModelConfig): Long
+
+    private external fun newFromAsset(
+        assetManager: AssetManager,
+        config: VadModelConfig,
+    ): Long
+
+    private external fun newFromFile(
+        config: VadModelConfig,
+    ): Long
+
     private external fun acceptWaveform(ptr: Long, samples: FloatArray)
+    private external fun compute(ptr: Long, samples: FloatArray): Float
+
     private external fun empty(ptr: Long): Boolean
     private external fun pop(ptr: Long)
     private external fun clear(ptr: Long)

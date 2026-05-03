@@ -20,6 +20,65 @@ data class OfflineTransducerModelConfig(
 
 data class OfflineParaformerModelConfig(
     var model: String = "",
+    var qnnConfig: QnnConfig = QnnConfig(),
+)
+
+data class OfflineNemoEncDecCtcModelConfig(
+    var model: String = "",
+)
+
+data class OfflineDolphinModelConfig(
+    var model: String = "",
+)
+
+data class OfflineZipformerCtcModelConfig(
+    var model: String = "",
+    var qnnConfig: QnnConfig = QnnConfig(),
+)
+
+data class OfflineWenetCtcModelConfig(
+    var model: String = "",
+)
+
+data class OfflineOmnilingualAsrCtcModelConfig(
+    var model: String = "",
+)
+
+data class OfflineMedAsrCtcModelConfig(
+    var model: String = "",
+)
+
+data class OfflineFireRedAsrCtcModelConfig(
+    var model: String = "",
+)
+
+data class OfflineFunAsrNanoModelConfig(
+    var encoderAdaptor: String = "",
+    var llm: String = "",
+    var embedding: String = "",
+    var tokenizer: String = "",
+    var systemPrompt: String = "You are a helpful assistant.",
+    var userPrompt: String = "音声認識：",
+    var maxNewTokens: Int = 512,
+    var temperature: Float = 1e-6f,
+    var topP: Float = 0.8f,
+    var seed: Int = 42,
+    var language: String = "",
+    var itn: Boolean = true,
+    var hotwords: String = "",
+)
+
+data class OfflineQwen3AsrModelConfig(
+    var convFrontend: String = "",
+    var encoder: String = "",
+    var decoder: String = "",
+    var tokenizer: String = "",
+    var maxTotalLen: Int = 512,
+    var maxNewTokens: Int = 128,
+    var temperature: Float = 1e-6f,
+    var topP: Float = 0.8f,
+    var seed: Int = 42,
+    var hotwords: String = "",
 )
 
 data class OfflineWhisperModelConfig(
@@ -28,16 +87,29 @@ data class OfflineWhisperModelConfig(
     var language: String = "en",
     var task: String = "transcribe",
     var tailPaddings: Int = 1000,
+    var enableTokenTimestamps: Boolean = false,
+    var enableSegmentTimestamps: Boolean = false,
 )
 
-data class OfflineSenseVoiceModelConfig(
-    var model: String = "",
+data class OfflineCanaryModelConfig(
+    var encoder: String = "",
+    var decoder: String = "",
+    var srcLang: String = "en",
+    var tgtLang: String = "en",
+    var usePnc: Boolean = true,
+)
+
+data class OfflineCohereTranscribeModelConfig(
+    var encoder: String = "",
+    var decoder: String = "",
     var language: String = "",
-    var useInverseTextNormalization: Boolean = true,
+    var usePunct: Boolean = true,
+    var useItn: Boolean = true,
 )
 
-data class OfflineNemoEncDecCtcModelConfig(
-    var model: String = "",
+data class OfflineFireRedAsrModelConfig(
+    var encoder: String = "",
+    var decoder: String = "",
 )
 
 data class OfflineMoonshineModelConfig(
@@ -48,13 +120,31 @@ data class OfflineMoonshineModelConfig(
     var mergedDecoder: String = "",
 )
 
+data class OfflineSenseVoiceModelConfig(
+    var model: String = "",
+    var language: String = "",
+    var useInverseTextNormalization: Boolean = true,
+    var qnnConfig: QnnConfig = QnnConfig(),
+)
+
 data class OfflineModelConfig(
     var transducer: OfflineTransducerModelConfig = OfflineTransducerModelConfig(),
     var paraformer: OfflineParaformerModelConfig = OfflineParaformerModelConfig(),
     var whisper: OfflineWhisperModelConfig = OfflineWhisperModelConfig(),
-    var senseVoice: OfflineSenseVoiceModelConfig = OfflineSenseVoiceModelConfig(),
-    var nemo: OfflineNemoEncDecCtcModelConfig = OfflineNemoEncDecCtcModelConfig(),
+    var fireRedAsr: OfflineFireRedAsrModelConfig = OfflineFireRedAsrModelConfig(),
     var moonshine: OfflineMoonshineModelConfig = OfflineMoonshineModelConfig(),
+    var nemo: OfflineNemoEncDecCtcModelConfig = OfflineNemoEncDecCtcModelConfig(),
+    var senseVoice: OfflineSenseVoiceModelConfig = OfflineSenseVoiceModelConfig(),
+    var dolphin: OfflineDolphinModelConfig = OfflineDolphinModelConfig(),
+    var zipformerCtc: OfflineZipformerCtcModelConfig = OfflineZipformerCtcModelConfig(),
+    var wenetCtc: OfflineWenetCtcModelConfig = OfflineWenetCtcModelConfig(),
+    var omnilingual: OfflineOmnilingualAsrCtcModelConfig = OfflineOmnilingualAsrCtcModelConfig(),
+    var medasr: OfflineMedAsrCtcModelConfig = OfflineMedAsrCtcModelConfig(),
+    var funasrNano: OfflineFunAsrNanoModelConfig = OfflineFunAsrNanoModelConfig(),
+    var qwen3Asr: OfflineQwen3AsrModelConfig = OfflineQwen3AsrModelConfig(),
+    var fireRedAsrCtc: OfflineFireRedAsrCtcModelConfig = OfflineFireRedAsrCtcModelConfig(),
+    var canary: OfflineCanaryModelConfig = OfflineCanaryModelConfig(),
+    var cohereTranscribe: OfflineCohereTranscribeModelConfig = OfflineCohereTranscribeModelConfig(),
     var teleSpeech: String = "",
     var numThreads: Int = 1,
     var debug: Boolean = false,
@@ -106,22 +196,46 @@ class OfflineRecognizer(
         return OfflineStream(p)
     }
 
-    fun decode(stream: OfflineStream) = decode(ptr, stream.ptr)
+    fun createStream(hotwords: String): OfflineStream {
+        val p = createStreamWithHotwords(ptr, hotwords)
+        return OfflineStream(p)
+    }
 
     fun getResult(stream: OfflineStream): OfflineRecognizerResult {
         return getResult(stream.ptr)
     }
 
+    fun decode(stream: OfflineStream) = decode(ptr, stream.ptr)
+
+    fun setConfig(config: OfflineRecognizerConfig) = setConfig(ptr, config)
+
     private external fun delete(ptr: Long)
-    private external fun newFromAsset(assetManager: AssetManager, config: OfflineRecognizerConfig): Long
-    private external fun newFromFile(config: OfflineRecognizerConfig): Long
+
     private external fun createStream(ptr: Long): Long
+
+    private external fun createStreamWithHotwords(ptr: Long, hotwords: String): Long
+
+    private external fun setConfig(ptr: Long, config: OfflineRecognizerConfig)
+
+    private external fun newFromAsset(
+        assetManager: AssetManager,
+        config: OfflineRecognizerConfig,
+    ): Long
+
+    private external fun newFromFile(
+        config: OfflineRecognizerConfig,
+    ): Long
+
     private external fun decode(ptr: Long, streamPtr: Long)
+
     private external fun getResult(streamPtr: Long): OfflineRecognizerResult
 
     companion object {
         init {
             System.loadLibrary("sherpa-onnx-jni")
         }
+
+        @JvmStatic
+        external fun prependAdspLibraryPath(newPath: String)
     }
 }
