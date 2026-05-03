@@ -1,248 +1,364 @@
 package com.nexus.vision.translate
 
-import android.app.NotificationChannel
-import android.app.NotificationManager
-import android.app.Service
+import android.app.*
 import android.content.Context
 import android.content.Intent
 import android.content.pm.ServiceInfo
 import android.graphics.Color
 import android.graphics.PixelFormat
 import android.graphics.Typeface
-import android.os.Build
-import android.os.Bundle
-import android.os.IBinder
+import android.graphics.drawable.GradientDrawable
+import android.media.*
+import android.media.projection.MediaProjection
+import android.media.projection.MediaProjectionManager
+import android.os.*
 import android.provider.Settings
-import android.speech.RecognitionListener
-import android.speech.RecognizerIntent
-import android.speech.SpeechRecognizer
 import android.util.Log
-import android.util.TypedValue
-import android.view.Gravity
-import android.view.MotionEvent
-import android.view.View
-import android.view.WindowManager
+import android.view.*
 import android.widget.FrameLayout
 import android.widget.LinearLayout
 import android.widget.TextView
-import androidx.core.app.NotificationCompat
 import com.google.mlkit.nl.translate.TranslateLanguage
 import com.google.mlkit.nl.translate.Translation
+import com.google.mlkit.nl.translate.Translator
 import com.google.mlkit.nl.translate.TranslatorOptions
-import com.nexus.vision.R
+import com.k2fsa.sherpa.onnx.*
 
 class LiveTranslateService : Service() {
-
     companion object {
         private const val TAG = "LiveTranslate"
-        private const val CHANNEL_ID = "nexus_live_translate"
-        private const val NOTIFICATION_ID = 9002
-
+        private const val NOTIFICATION_ID = 2001
+        private const val CHANNEL_ID = "live_translate_channel"
         const val ACTION_START = "com.nexus.vision.translate.START"
         const val ACTION_STOP = "com.nexus.vision.translate.STOP"
         const val EXTRA_SOURCE_LANG = "source_lang"
         const val EXTRA_TARGET_LANG = "target_lang"
+        const val EXTRA_RESULT_DATA = "result_data"
 
-        // 再起動の間隔（長いほど動画への影響が小さい）
-        private const val RESTART_DELAY_MS = 2000L
-        private const val TRANSLATE_THROTTLE_MS = 1000L
+        private const val SAMPLE_RATE = 16000
+        private const val BUFFER_SAMPLES = 3200  // 200ms chunks
+        private const val TRANSLATE_THROTTLE_MS = 1200L
     }
 
-    private var windowManager: WindowManager? = null
-    private var subtitleView: View? = null
-    private var fabView: View? = null
-    private var originalTextView: TextView? = null
-    private var translatedTextView: TextView? = null
-    private var statusTextView: TextView? = null
-    private var listenButton: FrameLayout? = null
+    // sherpa-onnx
+    private var recognizer: OnlineRecognizer? = null
+    private var stream: OnlineStream? = null
 
-    private var speechRecognizer: SpeechRecognizer? = null
-    private var isCurrentlyListening = false
+    // AudioPlaybackCapture
+    private var mediaProjection: MediaProjection? = null
+    private var audioRecord: AudioRecord? = null
+    private var captureThread: Thread? = null
+    @Volatile private var isCapturing = false
 
-    private var translator: com.google.mlkit.nl.translate.Translator? = null
-    private var translatorReady = false
-
-    private var sourceLang = "en"
-    private var targetLang = "ja"
-
-    // 字幕履歴（直近5件を表示）
-    private val subtitleHistory = mutableListOf<Pair<String, String>>() // original, translated
-    private var historyTextView: TextView? = null
-
-    private var currentButtonBg: View? = null
+    // Translation
+    private var translator: Translator? = null
     private var lastTranslateTime = 0L
     private var lastTranslatedText = ""
 
-    private var restartJob: android.os.Handler? = android.os.Handler(android.os.Looper.getMainLooper())
-    private var restartRunnable: Runnable? = null
-    private var pendingRestart = false
+    // UI
+    private var windowManager: WindowManager? = null
+    private var overlayView: View? = null
+    private var floatingButton: View? = null
+    private var originalTextView: TextView? = null
+    private var translatedTextView: TextView? = null
+    private var statusTextView: TextView? = null
+    private var isCurrentlyListening = false
+    private var currentButtonBg: View? = null
 
-    override fun onCreate() {
-        super.onCreate()
-        createNotificationChannel()
-    }
+    // History
+    private val history = mutableListOf<Pair<String, String>>()
+    private var historyView: LinearLayout? = null
+
+    override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        return when (intent?.action) {
+        when (intent?.action) {
             ACTION_START -> {
-                sourceLang = intent.getStringExtra(EXTRA_SOURCE_LANG) ?: "en"
-                targetLang = intent.getStringExtra(EXTRA_TARGET_LANG) ?: "ja"
-                try {
-                    startForegroundNotification()
-                    setupTranslator()
-                    createSubtitleOverlay()
-                    createFloatingButton()
-                } catch (e: Exception) {
-                    Log.e(TAG, "Failed to start", e)
-                    stopSelf()
+                val sourceLang = intent.getStringExtra(EXTRA_SOURCE_LANG) ?: "en"
+                val targetLang = intent.getStringExtra(EXTRA_TARGET_LANG) ?: "ja"
+
+                @Suppress("DEPRECATION")
+                val resultData = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                    intent.getParcelableExtra(EXTRA_RESULT_DATA, Intent::class.java)
+                } else {
+                    intent.getParcelableExtra(EXTRA_RESULT_DATA)
                 }
-                START_STICKY
+
+                startForegroundNotification()
+
+                // MediaProjection を取得
+                if (resultData != null) {
+                    val projectionManager = getSystemService(Context.MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
+                    mediaProjection = projectionManager.getMediaProjection(Activity.RESULT_OK, resultData)
+                    Log.i(TAG, "MediaProjection acquired")
+                } else {
+                    Log.e(TAG, "resultData is null — cannot start MediaProjection")
+                }
+
+                initSherpaOnnx()
+                initTranslator(sourceLang, targetLang)
+                createSubtitleOverlay()
+                createFloatingButton()
             }
             ACTION_STOP -> {
                 stopEverything()
-                START_NOT_STICKY
             }
-            else -> {
-                stopSelf()
-                START_NOT_STICKY
-            }
+        }
+        return START_NOT_STICKY
+    }
+
+    // ============================================================
+    //  sherpa-onnx 初期化
+    // ============================================================
+    private fun initSherpaOnnx() {
+        try {
+            val modelDir = "sherpa-onnx-streaming-zipformer-en-20M-2023-02-17"
+            val config = OnlineRecognizerConfig(
+                featConfig = FeatureConfig(sampleRate = SAMPLE_RATE, featureDim = 80),
+                modelConfig = OnlineModelConfig(
+                    transducer = OnlineTransducerModelConfig(
+                        encoder = "$modelDir/encoder-epoch-99-avg-1.int8.onnx",
+                        decoder = "$modelDir/decoder-epoch-99-avg-1.onnx",
+                        joiner = "$modelDir/joiner-epoch-99-avg-1.int8.onnx",
+                    ),
+                    tokens = "$modelDir/tokens.txt",
+                    modelType = "zipformer",
+                    numThreads = 2,
+                    debug = false,
+                    provider = "cpu",
+                ),
+                endpointConfig = EndpointConfig(
+                    rule1 = EndpointRule(false, 2.4f, 0.0f),
+                    rule2 = EndpointRule(true, 1.2f, 0.0f),
+                    rule3 = EndpointRule(false, 0.0f, 20.0f),
+                ),
+                enableEndpoint = true,
+                decodingMethod = "greedy_search",
+            )
+            recognizer = OnlineRecognizer(assetManager = assets, config = config)
+            stream = recognizer!!.createStream()
+            Log.i(TAG, "sherpa-onnx initialized OK")
+        } catch (e: Exception) {
+            Log.e(TAG, "sherpa-onnx init FAILED: ${e.message}", e)
+            updateStatus("STTエンジン初期化失敗")
         }
     }
 
-    private fun startForegroundNotification() {
-        val notification = NotificationCompat.Builder(this, CHANNEL_ID)
-            .setContentTitle("NEXUS リアルタイム翻訳")
-            .setContentText("フローティングボタンで翻訳")
-            .setSmallIcon(R.drawable.ic_launcher_foreground)
-            .setOngoing(true)
-            .build()
+    // ============================================================
+    //  AudioPlaybackCapture でシステム音声取得
+    // ============================================================
+    private fun startSystemAudioCapture() {
+        if (mediaProjection == null) {
+            Log.e(TAG, "MediaProjection is null")
+            updateStatus("MediaProjection エラー")
+            return
+        }
+        if (recognizer == null || stream == null) {
+            Log.e(TAG, "sherpa-onnx not initialized")
+            updateStatus("STTエンジン未初期化")
+            return
+        }
 
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            startForeground(NOTIFICATION_ID, notification,
-                ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE)
-        } else {
-            startForeground(NOTIFICATION_ID, notification)
+        try {
+            val captureConfig = AudioPlaybackCaptureConfiguration.Builder(mediaProjection!!)
+                .addMatchingUsage(AudioAttributes.USAGE_MEDIA)
+                .addMatchingUsage(AudioAttributes.USAGE_GAME)
+                .addMatchingUsage(AudioAttributes.USAGE_UNKNOWN)
+                .build()
+
+            val audioFormat = AudioFormat.Builder()
+                .setEncoding(AudioFormat.ENCODING_PCM_16BIT)
+                .setSampleRate(SAMPLE_RATE)
+                .setChannelMask(AudioFormat.CHANNEL_IN_MONO)
+                .build()
+
+            val minBuf = AudioRecord.getMinBufferSize(
+                SAMPLE_RATE, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT
+            )
+            val bufferSize = maxOf(minBuf, BUFFER_SAMPLES * 2)
+
+            audioRecord = AudioRecord.Builder()
+                .setAudioPlaybackCaptureConfig(captureConfig)
+                .setAudioFormat(audioFormat)
+                .setBufferSizeInBytes(bufferSize)
+                .build()
+
+            if (audioRecord?.state != AudioRecord.STATE_INITIALIZED) {
+                Log.e(TAG, "AudioRecord failed to init")
+                updateStatus("AudioRecord エラー")
+                return
+            }
+
+            isCapturing = true
+            audioRecord?.startRecording()
+            Log.i(TAG, "AudioRecord started, bufferSize=$bufferSize")
+
+            captureThread = Thread({
+                Log.i(TAG, "=== Capture thread started ===")
+                val shortBuffer = ShortArray(BUFFER_SAMPLES)
+                var totalSamples = 0L
+
+                while (isCapturing) {
+                    val read = audioRecord?.read(shortBuffer, 0, BUFFER_SAMPLES) ?: -1
+                    if (read > 0) {
+                        totalSamples += read
+
+                        // Short → Float (-1.0 ~ 1.0)
+                        val floatBuffer = FloatArray(read) { shortBuffer[it] / 32768.0f }
+
+                        // sherpa-onnx に送信
+                        stream?.acceptWaveform(floatBuffer, SAMPLE_RATE)
+
+                        // デコード
+                        while (recognizer?.isReady(stream!!) == true) {
+                            recognizer?.decode(stream!!)
+                        }
+
+                        // 部分結果を取得
+                        val result = recognizer?.getResult(stream!!)
+                        val text = result?.text?.trim() ?: ""
+
+                        if (text.isNotEmpty()) {
+                            Handler(Looper.getMainLooper()).post {
+                                onSpeechResult(text, false)
+                            }
+                        }
+
+                        // エンドポイント検出（発話の終わり）
+                        if (recognizer?.isEndpoint(stream!!) == true) {
+                            val finalText = recognizer?.getResult(stream!!)?.text?.trim() ?: ""
+                            if (finalText.isNotEmpty()) {
+                                Handler(Looper.getMainLooper()).post {
+                                    onSpeechResult(finalText, true)
+                                }
+                            }
+                            recognizer?.reset(stream!!)
+                            Log.d(TAG, "Endpoint detected, stream reset. Total samples: $totalSamples")
+                        }
+                    }
+                }
+                Log.i(TAG, "=== Capture thread stopped === total samples: $totalSamples")
+            }, "SherpaCapture")
+            captureThread?.start()
+
+            updateStatus("システム音声キャプチャ中...")
+        } catch (e: SecurityException) {
+            Log.e(TAG, "SecurityException: ${e.message}", e)
+            updateStatus("権限エラー: ${e.message}")
+        } catch (e: Exception) {
+            Log.e(TAG, "Capture start failed: ${e.message}", e)
+            updateStatus("キャプチャ開始失敗")
         }
     }
 
-    private fun setupTranslator() {
-        val srcLang = mapToTranslateLanguage(sourceLang)
-        val tgtLang = mapToTranslateLanguage(targetLang)
+    private fun stopSystemAudioCapture() {
+        isCapturing = false
+        try {
+            captureThread?.join(3000)
+            audioRecord?.stop()
+            audioRecord?.release()
+            audioRecord = null
+            captureThread = null
+            Log.i(TAG, "Audio capture stopped")
+        } catch (e: Exception) {
+            Log.e(TAG, "Error stopping capture: ${e.message}")
+        }
+    }
+
+    // ============================================================
+    //  認識結果の処理
+    // ============================================================
+    private fun onSpeechResult(text: String, isFinal: Boolean) {
+        val displayText = if (isFinal) text else "$text ..."
+        originalTextView?.text = displayText
+        Log.d(TAG, "STT ${if (isFinal) "FINAL" else "partial"}: \"$text\"")
+
+        val now = System.currentTimeMillis()
+        if (text == lastTranslatedText && !isFinal) return
+        if (now - lastTranslateTime < TRANSLATE_THROTTLE_MS && !isFinal) return
+
+        lastTranslateTime = now
+        lastTranslatedText = text
+
+        translator?.translate(text)
+            ?.addOnSuccessListener { translated ->
+                translatedTextView?.text = translated
+                Log.i(TAG, "translate: \"$text\" → \"$translated\"")
+                if (isFinal && text.length > 2) {
+                    history.add(Pair(text, translated))
+                    if (history.size > 5) history.removeAt(0)
+                    updateHistory()
+                }
+            }
+            ?.addOnFailureListener { e ->
+                Log.e(TAG, "Translation failed: ${e.message}")
+            }
+    }
+
+    // ============================================================
+    //  ML Kit Translation
+    // ============================================================
+    private fun initTranslator(sourceLang: String, targetLang: String) {
+        val srcLang = mapLang(sourceLang)
+        val tgtLang = mapLang(targetLang)
+
         val options = TranslatorOptions.Builder()
             .setSourceLanguage(srcLang)
             .setTargetLanguage(tgtLang)
             .build()
+
         translator = Translation.getClient(options)
-        translator!!.downloadModelIfNeeded()
-            .addOnSuccessListener {
-                translatorReady = true
-                Log.i(TAG, "Translator ready: $sourceLang -> $targetLang")
-                updateStatus("準備完了 — ボタンを押して翻訳")
+        translator?.downloadModelIfNeeded()
+            ?.addOnSuccessListener {
+                Log.i(TAG, "Translation model ready: $sourceLang → $targetLang")
+                updateStatus("準備完了 — 「翻」ボタンで開始")
             }
-            .addOnFailureListener { e ->
-                Log.e(TAG, "Model download failed", e)
-                updateStatus("モデルのダウンロードに失敗")
+            ?.addOnFailureListener { e ->
+                Log.e(TAG, "Translation model download failed: ${e.message}")
+                updateStatus("翻訳モデル取得失敗")
             }
     }
 
-    private fun mapToTranslateLanguage(code: String): String = when (code) {
-        "ja" -> TranslateLanguage.JAPANESE
-        "en" -> TranslateLanguage.ENGLISH
-        "zh" -> TranslateLanguage.CHINESE
-        "ko" -> TranslateLanguage.KOREAN
-        "es" -> TranslateLanguage.SPANISH
-        "fr" -> TranslateLanguage.FRENCH
-        "de" -> TranslateLanguage.GERMAN
-        "pt" -> TranslateLanguage.PORTUGUESE
-        "ru" -> TranslateLanguage.RUSSIAN
-        "ar" -> TranslateLanguage.ARABIC
-        else -> TranslateLanguage.ENGLISH
+    private fun mapLang(lang: String): String {
+        return when (lang.lowercase().take(2)) {
+            "en" -> TranslateLanguage.ENGLISH
+            "ja" -> TranslateLanguage.JAPANESE
+            "zh" -> TranslateLanguage.CHINESE
+            "ko" -> TranslateLanguage.KOREAN
+            "fr" -> TranslateLanguage.FRENCH
+            "de" -> TranslateLanguage.GERMAN
+            "es" -> TranslateLanguage.SPANISH
+            "pt" -> TranslateLanguage.PORTUGUESE
+            "ru" -> TranslateLanguage.RUSSIAN
+            "it" -> TranslateLanguage.ITALIAN
+            else -> TranslateLanguage.ENGLISH
+        }
     }
 
-    private fun createSubtitleOverlay() {
+    // ============================================================
+    //  フローティングボタン（トグル）
+    // ============================================================
+    private fun createFloatingButton() {
         if (!Settings.canDrawOverlays(this)) return
         windowManager = getSystemService(Context.WINDOW_SERVICE) as WindowManager
 
-        val container = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            setBackgroundColor(Color.parseColor("#CC000000"))
-            setPadding(dp(10), dp(4), dp(10), dp(4))
-        }
+        val dp = resources.displayMetrics.density
+        val size = (52 * dp).toInt()
 
-        historyTextView = TextView(this).apply {
-            setTextColor(Color.parseColor("#777777"))
-            setTextSize(TypedValue.COMPLEX_UNIT_SP, 10f)
-            maxLines = 2
-        }
-        container.addView(historyTextView)
-
-        originalTextView = TextView(this).apply {
-            setTextColor(Color.parseColor("#AAAAAA"))
-            setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
-            maxLines = 1
-        }
-        container.addView(originalTextView)
-
-        translatedTextView = TextView(this).apply {
+        val btn = TextView(this).apply {
+            text = "翻"
+            textSize = 18f
             setTextColor(Color.WHITE)
-            setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f)
-            maxLines = 2
-            typeface = Typeface.DEFAULT_BOLD
-        }
-        container.addView(translatedTextView)
-
-        statusTextView = TextView(this).apply {
-            setTextColor(Color.parseColor("#4CAF50"))
-            setTextSize(TypedValue.COMPLEX_UNIT_SP, 9f)
-        }
-        container.addView(statusTextView)
-
-        // ── 上部に配置（ボタンと干渉しない） ──
-        val params = WindowManager.LayoutParams(
-            WindowManager.LayoutParams.MATCH_PARENT,
-            WindowManager.LayoutParams.WRAP_CONTENT,
-            WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
-            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
-                    WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE or
-                    WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL,
-            PixelFormat.TRANSLUCENT
-        ).apply {
-            gravity = Gravity.TOP
-            y = 0
-        }
-
-        subtitleView = container
-        windowManager?.addView(container, params)
-    }
-
-    private fun createFloatingButton() {
-        if (!Settings.canDrawOverlays(this)) return
-
-        val size = dp(52)
-        val button = FrameLayout(this).apply {
-            setBackgroundColor(Color.TRANSPARENT)
-        }
-
-        // 丸い背景
-        val circle = View(this).apply {
-            background = android.graphics.drawable.GradientDrawable().apply {
-                shape = android.graphics.drawable.GradientDrawable.OVAL
+            gravity = Gravity.CENTER
+            layoutParams = FrameLayout.LayoutParams(size, size)
+            background = GradientDrawable().apply {
+                shape = GradientDrawable.OVAL
                 setColor(Color.parseColor("#2196F3"))
             }
+            elevation = 8f
         }
-        button.addView(circle, FrameLayout.LayoutParams(size, size))
+        currentButtonBg = btn
 
-        // アイコン代わりのテキスト
-        val icon = TextView(this).apply {
-            text = "翻"
-            setTextColor(Color.WHITE)
-            setTextSize(TypedValue.COMPLEX_UNIT_SP, 18f)
-            typeface = Typeface.DEFAULT_BOLD
-            gravity = Gravity.CENTER
-        }
-        button.addView(icon, FrameLayout.LayoutParams(size, size))
-
-        // ── 右下に配置 ──
         val params = WindowManager.LayoutParams(
             size, size,
             WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
@@ -250,317 +366,183 @@ class LiveTranslateService : Service() {
             PixelFormat.TRANSLUCENT
         ).apply {
             gravity = Gravity.END or Gravity.BOTTOM
-            x = dp(16)
-            y = dp(80)
+            x = (16 * dp).toInt()
+            y = (80 * dp).toInt()
         }
 
-        // タッチ: 短押し=翻訳開始、ドラッグ=移動
-        var initialX = 0
-        var initialY = 0
-        var touchX = 0f
-        var touchY = 0f
-        var moved = false
+        var initX = 0; var initY = 0
+        var touchX = 0f; var touchY = 0f
+        var dragging = false
 
-        button.setOnTouchListener { _, event ->
+        btn.setOnTouchListener { _, event ->
             when (event.action) {
                 MotionEvent.ACTION_DOWN -> {
-                    initialX = params.x
-                    initialY = params.y
-                    touchX = event.rawX
-                    touchY = event.rawY
-                    moved = false
-                    true
+                    initX = params.x; initY = params.y
+                    touchX = event.rawX; touchY = event.rawY
+                    dragging = false; true
                 }
                 MotionEvent.ACTION_MOVE -> {
-                    val dx = (event.rawX - touchX).toInt()
-                    val dy = (event.rawY - touchY).toInt()
-                    if (Math.abs(dx.toFloat()) > 10 || Math.abs(dy.toFloat()) > 10) moved = true
-                    if (moved) {
-                        params.x = initialX - dx
-                        params.y = initialY - dy
-                        windowManager?.updateViewLayout(button, params)
+                    val dx = event.rawX - touchX
+                    val dy = event.rawY - touchY
+                    if (kotlin.math.abs(dx) > 10 || kotlin.math.abs(dy) > 10) dragging = true
+                    if (dragging) {
+                        params.x = initX - dx.toInt()
+                        params.y = initY - dy.toInt()
+                        windowManager?.updateViewLayout(btn, params)
                     }
                     true
                 }
                 MotionEvent.ACTION_UP -> {
-                    if (!moved) {
-                        // タップ → 翻訳トリガー
-                        onTranslateButtonTap(circle)
-                    }
-                    true
+                    if (!dragging) onTranslateButtonTap(); true
                 }
                 else -> false
             }
         }
 
-        listenButton = button
-        fabView = button
-        windowManager?.addView(button, params)
+        windowManager?.addView(btn, params)
+        floatingButton = btn
     }
 
-    private fun onTranslateButtonTap(buttonBg: View) {
-        if (isCurrentlyListening) {
-            Log.i(TAG, ">>> ボタン押下 — 停止")
-            isCurrentlyListening = false
-            speechRecognizer?.stopListening()
-            speechRecognizer?.destroy()
-            speechRecognizer = null
-            resetButtonColor(buttonBg)
-            updateStatus("停止中 — ボタンを押して再開")
-            return
-        }
-
-        Log.i(TAG, ">>> ボタン押下 — 開始")
-        isCurrentlyListening = true
-        (buttonBg.background as? android.graphics.drawable.GradientDrawable)
-            ?.setColor(Color.parseColor("#FF5722"))
-        updateStatus("翻訳中...")
-        currentButtonBg = buttonBg
-        startContinuousListening()
-    }
-
-    private fun startContinuousListening() {
-        if (!isCurrentlyListening) return
-
-        Log.i(TAG, "=== 認識セッション開始 ===")
-        val sessionStart = System.currentTimeMillis()
-
-        speechRecognizer?.destroy()
-        speechRecognizer = SpeechRecognizer.createSpeechRecognizer(this)
-
-        speechRecognizer!!.setRecognitionListener(object : RecognitionListener {
-            override fun onReadyForSpeech(params: Bundle?) {
-                Log.d(TAG, "[${elapsed(sessionStart)}] onReadyForSpeech — マイク取得完了")
-            }
-
-            override fun onBeginningOfSpeech() {
-                Log.d(TAG, "[${elapsed(sessionStart)}] onBeginningOfSpeech — 音声検出開始")
-            }
-
-            override fun onRmsChanged(rmsdB: Float) {
-                // 音量ログ（頻度が高いので間引きが必要ならここにロジックを追加）
-            }
-
-            override fun onBufferReceived(buffer: ByteArray?) {
-                Log.v(TAG, "[${elapsed(sessionStart)}] onBufferReceived — ${buffer?.size ?: 0} bytes")
-            }
-
-            override fun onEndOfSpeech() {
-                Log.i(TAG, "[${elapsed(sessionStart)}] onEndOfSpeech — 音声途切れ検出")
-                // ここでは scheduleRestart しない。onResults または onError が必ず後続するため
-            }
-
-            override fun onError(error: Int) {
-                val errorName = when (error) {
-                    SpeechRecognizer.ERROR_NETWORK_TIMEOUT -> "NETWORK_TIMEOUT"
-                    SpeechRecognizer.ERROR_NETWORK -> "NETWORK"
-                    SpeechRecognizer.ERROR_AUDIO -> "AUDIO"
-                    SpeechRecognizer.ERROR_SERVER -> "SERVER"
-                    SpeechRecognizer.ERROR_CLIENT -> "CLIENT"
-                    SpeechRecognizer.ERROR_SPEECH_TIMEOUT -> "SPEECH_TIMEOUT"
-                    SpeechRecognizer.ERROR_NO_MATCH -> "NO_MATCH"
-                    SpeechRecognizer.ERROR_RECOGNIZER_BUSY -> "RECOGNIZER_BUSY"
-                    SpeechRecognizer.ERROR_INSUFFICIENT_PERMISSIONS -> "INSUFFICIENT_PERMISSIONS"
-                    SpeechRecognizer.ERROR_TOO_MANY_REQUESTS -> "TOO_MANY_REQUESTS"
-                    SpeechRecognizer.ERROR_LANGUAGE_NOT_SUPPORTED -> "LANGUAGE_NOT_SUPPORTED"
-                    SpeechRecognizer.ERROR_LANGUAGE_UNAVAILABLE -> "LANGUAGE_UNAVAILABLE"
-                    else -> "UNKNOWN($error)"
-                }
-                Log.w(TAG, "[${elapsed(sessionStart)}] onError — $errorName")
-
-                if (!isCurrentlyListening) return
-                updateStatus("$errorName — 再試行中...")
-                
-                val delay = when (error) {
-                    SpeechRecognizer.ERROR_NO_MATCH,
-                    SpeechRecognizer.ERROR_SPEECH_TIMEOUT -> 4000L  // 無音時は4秒待つ
-                    SpeechRecognizer.ERROR_NETWORK,
-                    SpeechRecognizer.ERROR_NETWORK_TIMEOUT -> 5000L
-                    else -> RESTART_DELAY_MS
-                }
-                scheduleRestart(delay)
-            }
-
-            override fun onResults(results: Bundle?) {
-                val matches = results?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
-                val scores = results?.getFloatArray(SpeechRecognizer.CONFIDENCE_SCORES)
-                val text = matches?.firstOrNull() ?: ""
-                val confidence = scores?.firstOrNull() ?: 0f
-
-                Log.i(TAG, "[${elapsed(sessionStart)}] onResults — " +
-                        "text=\"$text\", confidence=${"%.2f".format(confidence)}, " +
-                        "candidates=${matches?.size ?: 0}")
-
-                if (text.isNotBlank()) {
-                    processResult(text, isFinal = true)
-                }
-                scheduleRestart(RESTART_DELAY_MS)
-            }
-
-            override fun onPartialResults(partialResults: Bundle?) {
-                val text = partialResults?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
-                    ?.firstOrNull() ?: ""
-
-                Log.d(TAG, "[${elapsed(sessionStart)}] onPartialResults — \"$text\"")
-
-                if (text.isNotBlank()) {
-                    processResult(text, isFinal = false)
-                }
-            }
-
-            override fun onEvent(eventType: Int, params: Bundle?) {
-                Log.d(TAG, "[${elapsed(sessionStart)}] onEvent — type=$eventType")
-            }
-        })
-
-        val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
-            putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
-            putExtra(RecognizerIntent.EXTRA_LANGUAGE, sourceLang)
-            // 言語をさらに明示的に指定
-            putExtra(RecognizerIntent.EXTRA_LANGUAGE_PREFERENCE, sourceLang)
-            putExtra("android.speech.extra.EXTRA_ADDITIONAL_LANGUAGES", arrayOf<String>())
-            putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, true)
-            putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 1)
-            putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_COMPLETE_SILENCE_LENGTH_MILLIS, 10000L)
-            putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_POSSIBLY_COMPLETE_SILENCE_LENGTH_MILLIS, 8000L)
-            putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_MINIMUM_LENGTH_MILLIS, 15000L)
-        }
-
-        try {
-            speechRecognizer?.startListening(intent)
-            Log.d(TAG, "startListening called — lang=$sourceLang")
-        } catch (e: Exception) {
-            Log.e(TAG, "startListening FAILED", e)
-            scheduleRestart()
-        }
-    }
-
-    private fun scheduleRestart(delayMs: Long = RESTART_DELAY_MS) {
+    private fun onTranslateButtonTap() {
         if (!isCurrentlyListening) {
-            Log.d(TAG, "scheduleRestart — skipped (not listening)")
-            return
-        }
-        
-        if (pendingRestart) {
-            Log.d(TAG, "scheduleRestart — 既にスケジュール済み、スキップ")
-            return
-        }
-        pendingRestart = true
-
-        // 前のタイマーがあればキャンセル
-        restartRunnable?.let { restartJob?.removeCallbacks(it) }
-
-        restartRunnable = Runnable {
-            pendingRestart = false
-            if (isCurrentlyListening) {
-                Log.i(TAG, "--- 再起動実行 ---")
-                startContinuousListening()
+            Log.i(TAG, ">>> ボタン押下 — キャプチャ開始")
+            isCurrentlyListening = true
+            (currentButtonBg as? TextView)?.background = GradientDrawable().apply {
+                shape = GradientDrawable.OVAL
+                setColor(Color.parseColor("#F44336"))
             }
+            startSystemAudioCapture()
+        } else {
+            Log.i(TAG, ">>> ボタン押下 — キャプチャ停止")
+            isCurrentlyListening = false
+            (currentButtonBg as? TextView)?.background = GradientDrawable().apply {
+                shape = GradientDrawable.OVAL
+                setColor(Color.parseColor("#2196F3"))
+            }
+            stopSystemAudioCapture()
+            updateStatus("停止中")
         }
-        
-        Log.i(TAG, "scheduleRestart — ${delayMs}ms 後に再開")
-        restartJob?.postDelayed(restartRunnable!!, delayMs)
     }
 
-    private fun processResult(text: String, isFinal: Boolean) {
-        android.os.Handler(mainLooper).post {
-            originalTextView?.text = if (isFinal) text else "$text ..."
+    // ============================================================
+    //  字幕オーバーレイ
+    // ============================================================
+    private fun createSubtitleOverlay() {
+        if (!Settings.canDrawOverlays(this)) return
+        if (windowManager == null) {
+            windowManager = getSystemService(Context.WINDOW_SERVICE) as WindowManager
         }
 
-        val now = System.currentTimeMillis()
-        if (!translatorReady || text.isBlank()) return
-        if (text == lastTranslatedText && !isFinal) return
-        if (!isFinal && now - lastTranslateTime < TRANSLATE_THROTTLE_MS) {
-            Log.v(TAG, "translate throttled — ${now - lastTranslateTime}ms since last")
-            return
+        val container = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setBackgroundColor(Color.parseColor("#CC000000"))
+            setPadding(24, 16, 24, 16)
         }
 
-        lastTranslateTime = now
-        lastTranslatedText = text
+        statusTextView = TextView(this).apply {
+            setTextColor(Color.parseColor("#80FFFFFF"))
+            textSize = 11f
+            text = "初期化中..."
+        }
+        originalTextView = TextView(this).apply {
+            setTextColor(Color.parseColor("#B0B0B0"))
+            textSize = 13f
+        }
+        translatedTextView = TextView(this).apply {
+            setTextColor(Color.WHITE)
+            textSize = 16f
+            setTypeface(null, Typeface.BOLD)
+        }
+        historyView = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+        }
 
-        Log.d(TAG, "translate request — \"$text\" (final=$isFinal)")
-        val translateStart = System.currentTimeMillis()
+        container.addView(statusTextView)
+        container.addView(originalTextView)
+        container.addView(translatedTextView)
+        container.addView(historyView)
 
-        translator?.translate(text)
-            ?.addOnSuccessListener { translated ->
-                val translateMs = System.currentTimeMillis() - translateStart
-                Log.i(TAG, "translate done — \"$translated\" (${translateMs}ms)")
-                android.os.Handler(mainLooper).post {
-                    translatedTextView?.text = translated
-                    if (isFinal) {
-                        subtitleHistory.add(text to translated)
-                        if (subtitleHistory.size > 5) subtitleHistory.removeAt(0)
-                        updateHistory()
-                    }
-                }
-            }
-            ?.addOnFailureListener { e ->
-                Log.e(TAG, "translate FAILED", e)
-            }
-    }
+        val params = WindowManager.LayoutParams(
+            WindowManager.LayoutParams.MATCH_PARENT,
+            WindowManager.LayoutParams.WRAP_CONTENT,
+            WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
+            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
+                    WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL,
+            PixelFormat.TRANSLUCENT
+        ).apply {
+            gravity = Gravity.TOP
+        }
 
-    private fun updateHistory() {
-        val historyText = subtitleHistory.dropLast(1).joinToString("\n") { (_, tr) -> tr }
-        historyTextView?.text = historyText
+        windowManager?.addView(container, params)
+        overlayView = container
     }
 
     private fun updateStatus(text: String) {
-        android.os.Handler(mainLooper).post {
+        Handler(Looper.getMainLooper()).post {
             statusTextView?.text = text
         }
     }
 
-    private fun resetButtonColor(buttonBg: View) {
-        android.os.Handler(mainLooper).post {
-            (buttonBg.background as? android.graphics.drawable.GradientDrawable)
-                ?.setColor(Color.parseColor("#2196F3"))
+    private fun updateHistory() {
+        historyView?.removeAllViews()
+        history.takeLast(3).forEach { (orig, trans) ->
+            val tv = TextView(this).apply {
+                setTextColor(Color.parseColor("#60FFFFFF"))
+                textSize = 11f
+                text = "$orig → $trans"
+            }
+            historyView?.addView(tv)
         }
     }
 
+    // ============================================================
+    //  通知
+    // ============================================================
+    private fun startForegroundNotification() {
+        val channel = NotificationChannel(
+            CHANNEL_ID, "Live Translation", NotificationManager.IMPORTANCE_LOW
+        )
+        (getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager)
+            .createNotificationChannel(channel)
+
+        val notification = Notification.Builder(this, CHANNEL_ID)
+            .setContentTitle("リアルタイム翻訳")
+            .setContentText("システム音声をキャプチャ中...")
+            .setSmallIcon(android.R.drawable.ic_btn_speak_now)
+            .build()
+
+        startForeground(
+            NOTIFICATION_ID, notification,
+            ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION
+        )
+    }
+
+    // ============================================================
+    //  クリーンアップ
+    // ============================================================
     private fun stopEverything() {
         isCurrentlyListening = false
-        speechRecognizer?.stopListening()
-        speechRecognizer?.destroy()
-        speechRecognizer = null
-        currentButtonBg = null
+        stopSystemAudioCapture()
 
-        restartRunnable?.let { restartJob?.removeCallbacks(it) }
-        pendingRestart = false
+        stream?.release(); stream = null
+        recognizer?.release(); recognizer = null
+        translator?.close(); translator = null
+        mediaProjection?.stop(); mediaProjection = null
 
-        subtitleView?.let { windowManager?.removeView(it) }
-        subtitleView = null
-        fabView?.let { windowManager?.removeView(it) }
-        fabView = null
-
-        translator?.close()
-        translator = null
+        try {
+            overlayView?.let { windowManager?.removeView(it) }
+            floatingButton?.let { windowManager?.removeView(it) }
+        } catch (e: Exception) {
+            Log.e(TAG, "Error removing views: ${e.message}")
+        }
+        overlayView = null; floatingButton = null
 
         stopForeground(STOP_FOREGROUND_REMOVE)
         stopSelf()
-        Log.i(TAG, "Service stopped")
     }
 
     override fun onDestroy() {
         super.onDestroy()
         stopEverything()
-    }
-
-    override fun onBind(intent: Intent?): IBinder? = null
-
-    private fun dp(value: Int): Int =
-        TypedValue.applyDimension(TypedValue.COMPLEX_UNIT_DIP, value.toFloat(),
-            resources.displayMetrics).toInt()
-
-    private fun createNotificationChannel() {
-        val channel = NotificationChannel(CHANNEL_ID, "リアルタイム翻訳",
-            NotificationManager.IMPORTANCE_LOW).apply {
-            description = "音声翻訳サービス通知"
-        }
-        getSystemService(NotificationManager::class.java).createNotificationChannel(channel)
-    }
-
-    private fun elapsed(start: Long): String {
-        val ms = System.currentTimeMillis() - start
-        return "${ms / 1000}.${(ms % 1000) / 100}s"
     }
 }

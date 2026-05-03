@@ -1,8 +1,10 @@
 package com.nexus.vision.translate
 
 import android.Manifest
+import android.app.Activity
 import android.content.Context
 import android.content.Intent
+import android.media.projection.MediaProjectionManager
 import android.provider.Settings
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
@@ -27,7 +29,6 @@ fun TranslateScreen() {
     var isRunning by remember { mutableStateOf(false) }
     var selectedSource by remember { mutableStateOf("en") }
     var selectedTarget by remember { mutableStateOf("ja") }
-    var pendingStart by remember { mutableStateOf(false) }
 
     val languages = listOf(
         "en" to "English",
@@ -39,23 +40,24 @@ fun TranslateScreen() {
         "de" to "Deutsch",
         "pt" to "Português",
         "ru" to "Русский",
-        "ar" to "العربية"
+        "it" to "Italiano"
     )
 
-    var hasAudioPermission by remember {
-        mutableStateOf(
-            ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) ==
-                    android.content.pm.PackageManager.PERMISSION_GRANTED
-        )
+    val mediaProjectionManager = remember {
+        context.getSystemService(Context.MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
     }
 
-    val permissionLauncher = rememberLauncherForActivityResult(
-        ActivityResultContracts.RequestPermission()
-    ) { granted ->
-        hasAudioPermission = granted
-        if (granted && pendingStart) {
-            pendingStart = false
-            startTranslateService(context, selectedSource, selectedTarget)
+    val projectionLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.StartActivityForResult()
+    ) { result ->
+        if (result.resultCode == Activity.RESULT_OK && result.data != null) {
+            val intent = Intent(context, LiveTranslateService::class.java).apply {
+                action = LiveTranslateService.ACTION_START
+                putExtra(LiveTranslateService.EXTRA_SOURCE_LANG, selectedSource)
+                putExtra(LiveTranslateService.EXTRA_TARGET_LANG, selectedTarget)
+                putExtra(LiveTranslateService.EXTRA_RESULT_DATA, result.data)
+            }
+            context.startForegroundService(intent)
             isRunning = true
         }
     }
@@ -68,7 +70,7 @@ fun TranslateScreen() {
         horizontalAlignment = Alignment.CenterHorizontally
     ) {
         Text(
-            "NEXUS リアルタイム翻訳",
+            "NEXUS リアルタイム翻訳 (内部音声)",
             color = Color.White, fontSize = 20.sp,
             fontWeight = FontWeight.Medium,
             modifier = Modifier.padding(top = 16.dp, bottom = 24.dp)
@@ -107,13 +109,14 @@ fun TranslateScreen() {
                 shape = RoundedCornerShape(12.dp)
             ) {
                 Column(modifier = Modifier.padding(16.dp)) {
-                    Text("使い方", color = Color.White, fontSize = 14.sp, fontWeight = FontWeight.Bold)
+                    Text("使い方 (内部音声キャプチャ)", color = Color.White, fontSize = 14.sp, fontWeight = FontWeight.Bold)
                     Spacer(Modifier.height(8.dp))
                     Text(
                         "1. 言語を選択して「開始」を押す\n" +
-                        "2. YouTubeなどをスピーカーで再生\n" +
-                        "3. 画面下部に字幕が表示されます\n" +
-                        "4. 字幕バーはドラッグで移動可能",
+                        "2. キャプチャ許可ダイアログで「今すぐ開始」を選択\n" +
+                        "3. 右下の青い「翻」ボタンを押してキャプチャ開始\n" +
+                        "4. YouTubeなどのアプリを再生（イヤホンでもOK）\n" +
+                        "5. 字幕が画面上部にリアルタイム表示されます",
                         color = Color(0xFF999999), fontSize = 12.sp, lineHeight = 18.sp
                     )
                 }
@@ -142,17 +145,8 @@ fun TranslateScreen() {
                         context.startActivity(overlayIntent)
                         return@Button
                     }
-                    // 2. RECORD_AUDIO 権限チェック（これがないとサービス起動でクラッシュ）
-                    if (ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO)
-                        != android.content.pm.PackageManager.PERMISSION_GRANTED
-                    ) {
-                        pendingStart = true
-                        permissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
-                        return@Button
-                    }
-                    // 3. 権限OK → サービス開始
-                    startTranslateService(context, selectedSource, selectedTarget)
-                    isRunning = true
+                    // 2. MediaProjection 許可取得
+                    projectionLauncher.launch(mediaProjectionManager.createScreenCaptureIntent())
                 }
             },
             modifier = Modifier.fillMaxWidth().height(56.dp),
@@ -197,13 +191,4 @@ private fun LanguageSelector(
             )
         }
     }
-}
-
-private fun startTranslateService(context: Context, source: String, target: String) {
-    val serviceIntent = Intent(context, LiveTranslateService::class.java).apply {
-        action = LiveTranslateService.ACTION_START
-        putExtra(LiveTranslateService.EXTRA_SOURCE_LANG, source)
-        putExtra(LiveTranslateService.EXTRA_TARGET_LANG, target)
-    }
-    context.startForegroundService(serviceIntent)
 }
