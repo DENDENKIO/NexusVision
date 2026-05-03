@@ -44,7 +44,7 @@ class LiveTranslateService : Service() {
     private var recognizer: OfflineRecognizer? = null
 
     // Silero VAD
-    private var vad: VoiceActivityDetector? = null
+    private var vad: Vad? = null
 
     // AudioPlaybackCapture
     private var mediaProjection: MediaProjection? = null
@@ -86,15 +86,20 @@ class LiveTranslateService : Service() {
                     intent.getParcelableExtra(EXTRA_RESULT_DATA)
                 }
 
-                startForegroundNotification()
-
-                if (resultData != null) {
-                    val pm = getSystemService(Context.MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
-                    mediaProjection = pm.getMediaProjection(Activity.RESULT_OK, resultData)
-                    Log.i(TAG, "MediaProjection acquired")
-                } else {
-                    Log.e(TAG, "resultData is null")
+                // resultData が null なら何もせず終了（再起動ループ防止）
+                if (resultData == null) {
+                    Log.e(TAG, "resultData is null — cannot start")
+                    stopSelf()
+                    return START_NOT_STICKY
                 }
+
+                // MediaProjection を先に取得
+                val pm = getSystemService(Context.MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
+                mediaProjection = pm.getMediaProjection(Activity.RESULT_OK, resultData)
+                Log.i(TAG, "MediaProjection acquired")
+
+                // MediaProjection 取得後に foreground 開始
+                startForegroundNotification()
 
                 initSherpaOnnx(sourceLang)
                 initTranslator(sourceLang, targetLang)
@@ -113,7 +118,7 @@ class LiveTranslateService : Service() {
         try {
             // --- Silero VAD ---
             val vadConfig = VadModelConfig(
-                sileroVad = SileroVadModelConfig(
+                sileroVadModelConfig = SileroVadModelConfig(
                     model = "silero_vad.onnx",
                     threshold = 0.4f,
                     minSilenceDuration = 0.3f,
@@ -125,7 +130,7 @@ class LiveTranslateService : Service() {
                 numThreads = 1,
                 provider = "cpu",
             )
-            vad = VoiceActivityDetector(assetManager = assets, config = vadConfig)
+            vad = Vad(assetManager = assets, config = vadConfig)
             Log.i(TAG, "Silero VAD initialized")
 
             // --- SenseVoice (offline, multilingual) ---
@@ -143,7 +148,7 @@ class LiveTranslateService : Service() {
                     senseVoice = OfflineSenseVoiceModelConfig(
                         model = "$senseVoiceDir/model.int8.onnx",
                         language = senseVoiceLang,
-                        useItn = true,
+                        useInverseTextNormalization = true,
                     ),
                     tokens = "$senseVoiceDir/tokens.txt",
                     numThreads = 2,
@@ -218,7 +223,8 @@ class LiveTranslateService : Service() {
 
                         // 音声区間が検出されたら認識
                         while (vad?.empty() == false) {
-                            val segment = vad!!.pop()
+                            val segment = vad!!.front()
+                            vad!!.pop()
                             Log.d(TAG, "VAD segment: ${segment.samples.size} samples (${segment.samples.size / SAMPLE_RATE.toFloat()}s)")
 
                             // SenseVoice で認識
@@ -458,12 +464,22 @@ class LiveTranslateService : Service() {
     private fun startForegroundNotification() {
         val ch = NotificationChannel(CHANNEL_ID, "Live Translation", NotificationManager.IMPORTANCE_LOW)
         (getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager).createNotificationChannel(ch)
-        val n = Notification.Builder(this, CHANNEL_ID)
+
+        val notification = Notification.Builder(this, CHANNEL_ID)
             .setContentTitle("リアルタイム翻訳")
             .setContentText("システム音声キャプチャ中...")
             .setSmallIcon(android.R.drawable.ic_btn_speak_now)
             .build()
-        startForeground(NOTIFICATION_ID, n, ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION)
+
+        try {
+            startForeground(
+                NOTIFICATION_ID, notification,
+                ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION
+            )
+        } catch (e: SecurityException) {
+            Log.e(TAG, "startForeground failed: ${e.message}")
+            stopSelf()
+        }
     }
 
     // ============================================================

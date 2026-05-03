@@ -5,14 +5,24 @@ import android.content.res.AssetManager
 data class SileroVadModelConfig(
     var model: String = "",
     var threshold: Float = 0.5f,
-    var minSilenceDuration: Float = 0.5f,
+    var minSilenceDuration: Float = 0.25f,
     var minSpeechDuration: Float = 0.25f,
     var windowSize: Int = 512,
-    var maxSpeechDuration: Float = 30.0f,
+    var maxSpeechDuration: Float = 5.0f,
+)
+
+data class TenVadModelConfig(
+    var model: String = "",
+    var threshold: Float = 0.5f,
+    var minSilenceDuration: Float = 0.25f,
+    var minSpeechDuration: Float = 0.25f,
+    var windowSize: Int = 256,
+    var maxSpeechDuration: Float = 5.0f,
 )
 
 data class VadModelConfig(
-    var sileroVad: SileroVadModelConfig = SileroVadModelConfig(),
+    var sileroVadModelConfig: SileroVadModelConfig = SileroVadModelConfig(),
+    var tenVadModelConfig: TenVadModelConfig = TenVadModelConfig(),
     var sampleRate: Int = 16000,
     var numThreads: Int = 1,
     var provider: String = "cpu",
@@ -21,18 +31,17 @@ data class VadModelConfig(
 
 class SpeechSegment(val start: Int, val samples: FloatArray)
 
-class VoiceActivityDetector(
+class Vad(
     assetManager: AssetManager? = null,
-    val config: VadModelConfig,
-    var bufferSizeInSeconds: Float = 60.0f,
+    var config: VadModelConfig,
 ) {
     private var ptr: Long
 
     init {
         ptr = if (assetManager != null) {
-            newFromAsset(assetManager, config, bufferSizeInSeconds)
+            newFromAsset(assetManager, config)
         } else {
-            newFromFile(config, bufferSizeInSeconds)
+            newFromFile(config)
         }
     }
 
@@ -47,23 +56,20 @@ class VoiceActivityDetector(
 
     fun acceptWaveform(samples: FloatArray) = acceptWaveform(ptr, samples)
     fun empty(): Boolean = empty(ptr)
-    fun pop(): SpeechSegment = front(ptr)
+    fun front(): SpeechSegment = front(ptr)
+    fun pop() = pop(ptr)
+    fun clear() = clear(ptr)
     fun isSpeechDetected(): Boolean = isSpeechDetected(ptr)
     fun reset() = reset(ptr)
     fun flush() = flush(ptr)
 
     private external fun delete(ptr: Long)
-    private external fun newFromAsset(
-        assetManager: AssetManager,
-        config: VadModelConfig,
-        bufferSizeInSeconds: Float,
-    ): Long
-    private external fun newFromFile(
-        config: VadModelConfig,
-        bufferSizeInSeconds: Float,
-    ): Long
+    private external fun newFromAsset(assetManager: AssetManager, config: VadModelConfig): Long
+    private external fun newFromFile(config: VadModelConfig): Long
     private external fun acceptWaveform(ptr: Long, samples: FloatArray)
     private external fun empty(ptr: Long): Boolean
+    private external fun pop(ptr: Long)
+    private external fun clear(ptr: Long)
     private external fun front(ptr: Long): SpeechSegment
     private external fun isSpeechDetected(ptr: Long): Boolean
     private external fun reset(ptr: Long)
