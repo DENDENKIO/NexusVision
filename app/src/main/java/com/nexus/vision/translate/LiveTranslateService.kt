@@ -93,13 +93,19 @@ class LiveTranslateService : Service() {
                     return START_NOT_STICKY
                 }
 
-                // MediaProjection を先に取得
-                val pm = getSystemService(Context.MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
-                mediaProjection = pm.getMediaProjection(Activity.RESULT_OK, resultData)
-                Log.i(TAG, "MediaProjection acquired")
-
-                // MediaProjection 取得後に foreground 開始
+                // ① まず Foreground Service を開始（MediaProjection タイプ）
                 startForegroundNotification()
+
+                // ② Foreground 状態になった後で MediaProjection を取得
+                try {
+                    val pm = getSystemService(Context.MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
+                    mediaProjection = pm.getMediaProjection(Activity.RESULT_OK, resultData)
+                    Log.i(TAG, "MediaProjection acquired")
+                } catch (e: SecurityException) {
+                    Log.e(TAG, "getMediaProjection failed: ${e.message}")
+                    stopSelf()
+                    return START_NOT_STICKY
+                }
 
                 initSherpaOnnx(sourceLang)
                 initTranslator(sourceLang, targetLang)
@@ -476,6 +482,7 @@ class LiveTranslateService : Service() {
                 NOTIFICATION_ID, notification,
                 ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION
             )
+            Log.i(TAG, "startForeground OK")
         } catch (e: SecurityException) {
             Log.e(TAG, "startForeground failed: ${e.message}")
             stopSelf()
