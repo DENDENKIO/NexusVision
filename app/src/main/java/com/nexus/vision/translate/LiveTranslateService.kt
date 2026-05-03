@@ -73,6 +73,10 @@ class LiveTranslateService : Service() {
     private var lastTranslateTime = 0L
     private var lastTranslatedText = ""
 
+    private var restartJob: android.os.Handler? = android.os.Handler(android.os.Looper.getMainLooper())
+    private var restartRunnable: Runnable? = null
+    private var pendingRestart = false
+
     override fun onCreate() {
         super.onCreate()
         createNotificationChannel()
@@ -155,60 +159,55 @@ class LiveTranslateService : Service() {
         else -> TranslateLanguage.ENGLISH
     }
 
-    // ── 字幕オーバーレイ（画面下部、常に表示） ──
     private fun createSubtitleOverlay() {
         if (!Settings.canDrawOverlays(this)) return
         windowManager = getSystemService(Context.WINDOW_SERVICE) as WindowManager
 
         val container = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setBackgroundColor(Color.parseColor("#DD000000"))
-            setPadding(dp(12), dp(6), dp(12), dp(6))
+            setBackgroundColor(Color.parseColor("#CC000000"))
+            setPadding(dp(10), dp(4), dp(10), dp(4))
         }
 
-        // 履歴テキスト
         historyTextView = TextView(this).apply {
             setTextColor(Color.parseColor("#777777"))
-            setTextSize(TypedValue.COMPLEX_UNIT_SP, 11f)
-            maxLines = 4
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 10f)
+            maxLines = 2
         }
         container.addView(historyTextView)
 
-        // 原文
         originalTextView = TextView(this).apply {
             setTextColor(Color.parseColor("#AAAAAA"))
-            setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
-            maxLines = 2
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
+            maxLines = 1
         }
         container.addView(originalTextView)
 
-        // 翻訳文
         translatedTextView = TextView(this).apply {
             setTextColor(Color.WHITE)
-            setTextSize(TypedValue.COMPLEX_UNIT_SP, 16f)
-            maxLines = 3
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f)
+            maxLines = 2
             typeface = Typeface.DEFAULT_BOLD
-            setPadding(0, dp(2), 0, 0)
         }
         container.addView(translatedTextView)
 
-        // ステータス
         statusTextView = TextView(this).apply {
             setTextColor(Color.parseColor("#4CAF50"))
-            setTextSize(TypedValue.COMPLEX_UNIT_SP, 10f)
-            setPadding(0, dp(2), 0, 0)
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 9f)
         }
         container.addView(statusTextView)
 
+        // ── 上部に配置（ボタンと干渉しない） ──
         val params = WindowManager.LayoutParams(
             WindowManager.LayoutParams.MATCH_PARENT,
             WindowManager.LayoutParams.WRAP_CONTENT,
             WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
             WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
+                    WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE or
                     WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL,
             PixelFormat.TRANSLUCENT
         ).apply {
-            gravity = Gravity.BOTTOM
+            gravity = Gravity.TOP
             y = 0
         }
 
@@ -216,11 +215,10 @@ class LiveTranslateService : Service() {
         windowManager?.addView(container, params)
     }
 
-    // ── フローティング翻訳ボタン（丸ボタン、ドラッグ可能） ──
     private fun createFloatingButton() {
         if (!Settings.canDrawOverlays(this)) return
 
-        val size = dp(56)
+        val size = dp(52)
         val button = FrameLayout(this).apply {
             setBackgroundColor(Color.TRANSPARENT)
         }
@@ -238,20 +236,22 @@ class LiveTranslateService : Service() {
         val icon = TextView(this).apply {
             text = "翻"
             setTextColor(Color.WHITE)
-            setTextSize(TypedValue.COMPLEX_UNIT_SP, 20f)
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 18f)
             typeface = Typeface.DEFAULT_BOLD
             gravity = Gravity.CENTER
         }
         button.addView(icon, FrameLayout.LayoutParams(size, size))
 
+        // ── 右下に配置 ──
         val params = WindowManager.LayoutParams(
             size, size,
             WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
             WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE,
             PixelFormat.TRANSLUCENT
         ).apply {
-            gravity = Gravity.END or Gravity.CENTER_VERTICAL
+            gravity = Gravity.END or Gravity.BOTTOM
             x = dp(16)
+            y = dp(80)
         }
 
         // タッチ: 短押し=翻訳開始、ドラッグ=移動
@@ -277,7 +277,7 @@ class LiveTranslateService : Service() {
                     if (Math.abs(dx.toFloat()) > 10 || Math.abs(dy.toFloat()) > 10) moved = true
                     if (moved) {
                         params.x = initialX - dx
-                        params.y = initialY + dy
+                        params.y = initialY - dy
                         windowManager?.updateViewLayout(button, params)
                     }
                     true
@@ -346,8 +346,8 @@ class LiveTranslateService : Service() {
             }
 
             override fun onEndOfSpeech() {
-                Log.i(TAG, "[${elapsed(sessionStart)}] onEndOfSpeech — 音声途切れ検出、再起動予約")
-                scheduleRestart()
+                Log.i(TAG, "[${elapsed(sessionStart)}] onEndOfSpeech — 音声途切れ検出")
+                // ここでは scheduleRestart しない。onResults または onError が必ず後続するため
             }
 
             override fun onError(error: Int) {
@@ -370,7 +370,15 @@ class LiveTranslateService : Service() {
 
                 if (!isCurrentlyListening) return
                 updateStatus("$errorName — 再試行中...")
-                scheduleRestart()
+                
+                val delay = when (error) {
+                    SpeechRecognizer.ERROR_NO_MATCH,
+                    SpeechRecognizer.ERROR_SPEECH_TIMEOUT -> 4000L  // 無音時は4秒待つ
+                    SpeechRecognizer.ERROR_NETWORK,
+                    SpeechRecognizer.ERROR_NETWORK_TIMEOUT -> 5000L
+                    else -> RESTART_DELAY_MS
+                }
+                scheduleRestart(delay)
             }
 
             override fun onResults(results: Bundle?) {
@@ -386,7 +394,7 @@ class LiveTranslateService : Service() {
                 if (text.isNotBlank()) {
                     processResult(text, isFinal = true)
                 }
-                scheduleRestart()
+                scheduleRestart(RESTART_DELAY_MS)
             }
 
             override fun onPartialResults(partialResults: Bundle?) {
@@ -408,6 +416,9 @@ class LiveTranslateService : Service() {
         val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
             putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
             putExtra(RecognizerIntent.EXTRA_LANGUAGE, sourceLang)
+            // 言語をさらに明示的に指定
+            putExtra(RecognizerIntent.EXTRA_LANGUAGE_PREFERENCE, sourceLang)
+            putExtra("android.speech.extra.EXTRA_ADDITIONAL_LANGUAGES", arrayOf<String>())
             putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, true)
             putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 1)
             putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_COMPLETE_SILENCE_LENGTH_MILLIS, 10000L)
@@ -424,18 +435,31 @@ class LiveTranslateService : Service() {
         }
     }
 
-    private fun scheduleRestart() {
+    private fun scheduleRestart(delayMs: Long = RESTART_DELAY_MS) {
         if (!isCurrentlyListening) {
             Log.d(TAG, "scheduleRestart — skipped (not listening)")
             return
         }
-        Log.i(TAG, "scheduleRestart — ${RESTART_DELAY_MS}ms 後に再開")
-        android.os.Handler(mainLooper).postDelayed({
+        
+        if (pendingRestart) {
+            Log.d(TAG, "scheduleRestart — 既にスケジュール済み、スキップ")
+            return
+        }
+        pendingRestart = true
+
+        // 前のタイマーがあればキャンセル
+        restartRunnable?.let { restartJob?.removeCallbacks(it) }
+
+        restartRunnable = Runnable {
+            pendingRestart = false
             if (isCurrentlyListening) {
                 Log.i(TAG, "--- 再起動実行 ---")
                 startContinuousListening()
             }
-        }, RESTART_DELAY_MS)
+        }
+        
+        Log.i(TAG, "scheduleRestart — ${delayMs}ms 後に再開")
+        restartJob?.postDelayed(restartRunnable!!, delayMs)
     }
 
     private fun processResult(text: String, isFinal: Boolean) {
@@ -499,6 +523,9 @@ class LiveTranslateService : Service() {
         speechRecognizer?.destroy()
         speechRecognizer = null
         currentButtonBg = null
+
+        restartRunnable?.let { restartJob?.removeCallbacks(it) }
+        pendingRestart = false
 
         subtitleView?.let { windowManager?.removeView(it) }
         subtitleView = null
