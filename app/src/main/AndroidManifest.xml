@@ -178,6 +178,11 @@
             android:foregroundServiceType="mediaProjection"
             android:exported="false" />
 
+        <service
+            android:name=".audio.TunerOverlayService"
+            android:foregroundServiceType="mediaProjection"
+            android:exported="false" />
+
     </application>
 
 </manifest>
