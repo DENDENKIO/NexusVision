@@ -7,57 +7,43 @@ import kotlin.math.sqrt
 
 /**
  * リアルタイム音階判定エンジン
- * - 自己相関（Autocorrelation）によるピッチ検出
+ * - YIN アルゴリズム（差分二乗関数 + 累積平均正規化）によるピッチ検出
+ * - オクターブエラーを大幅に削減
  * - 12平均律による音名マッピング（A4 = 440Hz）
  */
 object PitchDetector {
 
-    private const val TAG = "PitchDetector"
-
-    // ── 音名定義 ──
     private val NOTE_NAMES = arrayOf(
         "C", "C#", "D", "D#", "E", "F",
         "F#", "G", "G#", "A", "A#", "B"
     )
 
-    // ── 基準周波数 ──
     private const val A4_FREQ = 440.0
-    private const val A4_MIDI = 69  // MIDI番号: A4 = 69
+    private const val A4_MIDI = 69
 
-    // ── 検出範囲 (Hz) ──
-    private const val MIN_FREQ = 50.0   // ~G1
-    private const val MAX_FREQ = 2000.0 // ~B6
+    private const val MIN_FREQ = 50.0
+    private const val MAX_FREQ = 2000.0
 
-    // ── ノイズゲート: RMS がこの値未満なら無音とみなす ──
     private const val RMS_THRESHOLD = 0.02f
 
-    /**
-     * ピッチ検出結果
-     */
+    // YIN閾値: 小さいほど厳格（0.10〜0.20が一般的）
+    private const val YIN_THRESHOLD = 0.15
+
     data class PitchResult(
-        val frequency: Float,      // 検出周波数 (Hz)
-        val noteName: String,      // 音名 (例: "A", "C#")
-        val octave: Int,           // オクターブ番号 (例: 4)
-        val centsDiff: Float,      // 最寄りの音からのセント差 (-50 ~ +50)
-        val midiNumber: Int,       // MIDI番号
-        val amplitude: Float       // RMS振幅
+        val frequency: Float,
+        val noteName: String,
+        val octave: Int,
+        val centsDiff: Float,
+        val midiNumber: Int,
+        val amplitude: Float
     )
 
-    /**
-     * PCM float配列からピッチを検出する
-     * @param samples  -1.0〜1.0 に正規化された PCM データ
-     * @param sampleRate  サンプリングレート (Hz)
-     * @return PitchResult（無音の場合は null）
-     */
     fun detect(samples: FloatArray, sampleRate: Int): PitchResult? {
-        // ── 1. RMS 計算（ノイズゲート） ──
         val rms = calculateRms(samples)
         if (rms < RMS_THRESHOLD) return null
 
-        // ── 2. 自己相関によるピッチ検出 ──
-        val frequency = autocorrelation(samples, sampleRate) ?: return null
+        val frequency = yin(samples, sampleRate) ?: return null
 
-        // ── 3. 周波数 → 音名・オクターブ・セント差 ──
         val midiFloat = 12.0 * log2(frequency / A4_FREQ) + A4_MIDI
         val midiNumber = midiFloat.roundToInt()
         val centsDiff = ((midiFloat - midiNumber) * 100.0).toFloat()
@@ -77,69 +63,94 @@ object PitchDetector {
     }
 
     /**
-     * 自己相関アルゴリズム
-     * 論文比較で最も精度が高く、オクターブエラーが少ない手法。
+     * YINアルゴリズム
+     * Step1: 差分二乗関数 d(tau)
+     * Step2: 累積平均正規化差分 d'(tau)
+     * Step3: 閾値以下の最初のディップを採用（オクターブエラー防止）
+     * Step4: 放物線補間でサブサンプル精度
      */
-    private fun autocorrelation(samples: FloatArray, sampleRate: Int): Double? {
+    private fun yin(samples: FloatArray, sampleRate: Int): Double? {
         val n = samples.size
+        val halfN = n / 2
 
-        // 検出周波数範囲をラグ値に変換
-        val minLag = (sampleRate / MAX_FREQ).toInt().coerceAtLeast(1)
-        val maxLag = (sampleRate / MIN_FREQ).toInt().coerceAtMost(n - 1)
+        val minLag = (sampleRate / MAX_FREQ).toInt().coerceAtLeast(2)
+        val maxLag = (sampleRate / MIN_FREQ).toInt().coerceAtMost(halfN - 1)
 
-        if (minLag >= maxLag || maxLag >= n) return null
+        if (minLag >= maxLag) return null
 
-        // ── ゼロラグ（自己相関の最大値）を先に計算 ──
-        var zeroLagSum = 0.0
-        for (i in 0 until n) {
-            zeroLagSum += samples[i] * samples[i]
-        }
-        if (zeroLagSum < 1e-10) return null
+        // Step1 & Step2: 差分二乗関数 + 累積平均正規化
+        val diff = DoubleArray(maxLag + 1)
+        val cmndf = DoubleArray(maxLag + 1)
 
-        // ── 各ラグで自己相関値を計算し、最大ピークを探す ──
-        var bestLag = -1
-        var bestCorr = 0.0
+        // tau=0 は常に1（定義）
+        cmndf[0] = 1.0
+        diff[0] = 0.0
 
-        for (lag in minLag..maxLag) {
+        var runningSum = 0.0
+
+        for (tau in 1..maxLag) {
             var sum = 0.0
-            for (i in 0 until n - lag) {
-                sum += samples[i].toDouble() * samples[i + lag].toDouble()
+            for (i in 0 until halfN) {
+                val delta = samples[i].toDouble() - samples[i + tau].toDouble()
+                sum += delta * delta
             }
-            // 正規化
-            val normalized = sum / zeroLagSum
-
-            if (normalized > bestCorr) {
-                bestCorr = normalized
-                bestLag = lag
+            diff[tau] = sum
+            runningSum += sum
+            // 累積平均正規化
+            cmndf[tau] = if (runningSum > 0.0) {
+                sum * tau / runningSum
+            } else {
+                1.0
             }
         }
 
-        // 相関が弱すぎる場合は信頼できないと判断
-        if (bestLag < 0 || bestCorr < 0.2) return null
+        // Step3: 閾値以下の最初のローカルミニマムを探す
+        var bestTau = -1
 
-        // ── 放物線補間（パラボリック・インターポレーション） ──
-        // ラグの前後の値を使い、サブサンプル精度で真のピーク位置を推定
-        val refinedLag = if (bestLag > minLag && bestLag < maxLag) {
-            val corrPrev = autocorrAtLag(samples, bestLag - 1)
-            val corrCurr = autocorrAtLag(samples, bestLag)
-            val corrNext = autocorrAtLag(samples, bestLag + 1)
-            val delta = 0.5 * (corrPrev - corrNext) /
-                    (corrPrev - 2.0 * corrCurr + corrNext)
-            bestLag.toDouble() + delta
+        // minLagから探索、閾値以下に入ったあと最初の谷（上昇に転じる直前）を採用
+        var tau = minLag
+        while (tau < maxLag) {
+            if (cmndf[tau] < YIN_THRESHOLD) {
+                // 閾値以下に入った → ここから局所最小値を探す
+                while (tau + 1 < maxLag && cmndf[tau + 1] < cmndf[tau]) {
+                    tau++
+                }
+                bestTau = tau
+                break
+            }
+            tau++
+        }
+
+        // 閾値以下が見つからない場合は最小値を使用
+        if (bestTau < 0) {
+            var minVal = Double.MAX_VALUE
+            for (t in minLag..maxLag) {
+                if (cmndf[t] < minVal) {
+                    minVal = cmndf[t]
+                    bestTau = t
+                }
+            }
+        }
+
+        if (bestTau < 0 || cmndf[bestTau] >= 0.5) return null
+
+        // Step4: 放物線補間でサブサンプル精度
+        val refinedTau = if (bestTau in (minLag + 1) until maxLag) {
+            val y0 = cmndf[bestTau - 1]
+            val y1 = cmndf[bestTau]
+            val y2 = cmndf[bestTau + 1]
+            val denom = 2.0 * (2.0 * y1 - y0 - y2)
+            if (denom != 0.0) {
+                bestTau + (y0 - y2) / denom
+            } else {
+                bestTau.toDouble()
+            }
         } else {
-            bestLag.toDouble()
+            bestTau.toDouble()
         }
 
-        val freq = sampleRate.toDouble() / refinedLag
+        val freq = sampleRate.toDouble() / refinedTau
         return if (freq in MIN_FREQ..MAX_FREQ) freq else null
-    }
-
-    private fun autocorrAtLag(samples: FloatArray, lag: Int): Double {
-        var sum = 0.0
-        for (i in 0 until samples.size - lag) {
-            sum += samples[i].toDouble() * samples[i + lag].toDouble()
-        }
-        return sum
     }
 
     private fun calculateRms(samples: FloatArray): Float {

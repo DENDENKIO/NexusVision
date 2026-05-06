@@ -281,67 +281,199 @@ class TunerOverlayService : Service() {
     // ============================================================
     //  カスタムView: ピッチグラフ
     // ============================================================
+    // ============================================================
+    //  カスタムView: ピッチグラフ（ピアノロール方式）
+    // ============================================================
     inner class PitchGraphView(ctx: Context) : View(ctx) {
-        private var data: List<PitchDetector.PitchResult?> = emptyList()
-        private val lnP = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.parseColor("#804CAF50"); style = Paint.Style.STROKE; strokeWidth = 3f; strokeCap = Paint.Cap.ROUND; strokeJoin = Paint.Join.ROUND }
-        private val dotP = Paint(Paint.ANTI_ALIAS_FLAG)
-        private val gridP = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.parseColor("#333333"); strokeWidth = 1f }
-        private val gridPC = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.parseColor("#555555"); strokeWidth = 1.5f }
-        private val lblP = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.parseColor("#999999"); textSize = 20f }
-        private val lblPD = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.parseColor("#555555"); textSize = 18f }
-        private val bandP = Paint().apply { color = Color.parseColor("#1E1E1E") }
-        private val glowP = Paint(Paint.ANTI_ALIAS_FLAG)
-        private val badgeP = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.WHITE; textSize = 22f; typeface = Typeface.create(Typeface.DEFAULT, Typeface.BOLD) }
-        private val badgeBgP = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.parseColor("#CC4CAF50") }
-        private val notes = arrayOf("C","C#","D","D#","E","F","F#","G","G#","A","A#","B")
-        private val whites = setOf(0,2,4,5,7,9,11)
 
-        fun updateData(d: List<PitchDetector.PitchResult?>) { data = d; invalidate() }
+        private var data: List<PitchDetector.PitchResult?> = emptyList()
+
+        // EMAによる表示中心の安定化
+        private var smoothCenter = 60f
+        private val EMA_ALPHA = 0.05f
+        private val DISPLAY_RANGE = 12  // 上下12半音（約2オクターブ）
+
+        // 鍵盤定義
+        private val BLACK_KEYS = setOf(1, 3, 6, 8, 10)  // C#,D#,F#,G#,A#
+        private val NOTE_NAMES_ALL = arrayOf(
+            "C","C#","D","D#","E","F","F#","G","G#","A","A#","B"
+        )
+
+        // Paint類
+        private val bgP         = Paint().apply { color = Color.parseColor("#1A1A1A") }
+        private val blackKeyBgP = Paint().apply { color = Color.parseColor("#141414") }
+        private val gridP       = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            color = Color.parseColor("#2A2A2A"); strokeWidth = 0.8f
+        }
+        private val gridCLineP  = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            color = Color.parseColor("#335566"); strokeWidth = 1.5f
+            pathEffect = DashPathEffect(floatArrayOf(8f, 5f), 0f)
+        }
+        private val labelNormP  = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            color = Color.parseColor("#555555"); textSize = 15f
+            textAlign = Paint.Align.RIGHT
+        }
+        private val labelCP     = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            color = Color.parseColor("#6699AA"); textSize = 16f
+            typeface = Typeface.create(Typeface.DEFAULT, Typeface.BOLD)
+            textAlign = Paint.Align.RIGHT
+        }
+        private val trailP      = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            color = Color.parseColor("#604CAF50")
+            style = Paint.Style.STROKE; strokeWidth = 2.5f
+            strokeCap = Paint.Cap.ROUND; strokeJoin = Paint.Join.ROUND
+        }
+        private val dotP        = Paint(Paint.ANTI_ALIAS_FLAG)
+        private val glowP       = Paint(Paint.ANTI_ALIAS_FLAG)
+        private val badgeBgP    = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            color = Color.parseColor("#CC4CAF50")
+        }
+        private val badgeTextP  = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            color = Color.WHITE; textSize = 22f
+            typeface = Typeface.create(Typeface.DEFAULT, Typeface.BOLD)
+        }
+
+        fun updateData(d: List<PitchDetector.PitchResult?>) {
+            data = d
+            invalidate()
+        }
 
         override fun onDraw(c: Canvas) {
-            c.drawColor(Color.parseColor("#1A1A1A"))
-            val valid = data.filterNotNull(); if (valid.isEmpty()) return
-            val w = width.toFloat(); val h = height.toFloat()
-            val lp = 64f; val rp = 12f; val tp = 12f; val bp = 12f
-            val dw = w - lp - rp; val dh = h - tp - bp
-            val mn = valid.minOf { it.midiNumber }; val mx = valid.maxOf { it.midiNumber }
-            val ctr = (mn + mx) / 2f; val hr = ((mx - mn) / 2f).coerceAtLeast(6f) + 2f
-            val minM = (ctr - hr).toInt(); val maxM = (ctr + hr).toInt(); val mr = (maxM - minM).toFloat()
-            fun y(midi: Float) = tp + dh * (1f - (midi - minM) / mr)
+            val w = width.toFloat()
+            val h = height.toFloat()
+            val labelW = 52f   // 左端ラベル幅
+            val padR   = 12f
+            val padT   = 4f
+            val padB   = 4f
+            val graphW = w - labelW - padR
+            val graphH = h - padT - padB
 
-            for (m in minM..maxM) {
-                val ni = ((m % 12) + 12) % 12; val isW = ni in whites; val isC = ni == 0
-                val yy = y(m.toFloat())
-                if (!isW) c.drawRect(lp, yy - dh / mr / 2, w - rp, yy + dh / mr / 2, bandP)
-                c.drawLine(lp, yy, w - rp, yy, if (isC) gridPC else gridP)
-                if (isW) c.drawText(if (isC) "C${m / 12 - 1}" else notes[ni], 4f, yy + 5f, if (isC) lblP else lblPD)
+            // 背景
+            c.drawRect(0f, 0f, w, h, bgP)
+
+            // EMAで中心を更新（最新の有効データに追従）
+            val latest = data.lastOrNull { it != null }
+            if (latest != null) {
+                smoothCenter = smoothCenter * (1f - EMA_ALPHA) +
+                        (latest.midiNumber + latest.centsDiff / 100f) * EMA_ALPHA
             }
 
-            val step = dw / (PITCH_HISTORY_SIZE - 1).toFloat()
-            val path = Path(); var started = false
+            val minMidi = smoothCenter - DISPLAY_RANGE
+            val maxMidi = smoothCenter + DISPLAY_RANGE
+            val totalRange = maxMidi - minMidi  // = DISPLAY_RANGE * 2
+
+            // MIDI値 → Y座標変換（高い音 = 上）
+            fun midiToY(midi: Float): Float {
+                return padT + graphH * (1f - (midi - minMidi) / totalRange)
+            }
+
+            // ── 背景グリッド（鍵盤バンド + ライン + ラベル） ──
+            val minMidiInt = (minMidi - 1).toInt()
+            val maxMidiInt = (maxMidi + 1).toInt()
+
+            for (m in minMidiInt..maxMidiInt) {
+                val ni = ((m % 12) + 12) % 12
+                val isBlack = ni in BLACK_KEYS
+                val isC = ni == 0
+
+                val yCenter = midiToY(m.toFloat())
+                val halfCell = graphH / (totalRange * 2f)  // 半音1個の半分の高さ
+
+                // 黒鍵バンド
+                if (isBlack) {
+                    c.drawRect(
+                        labelW, yCenter - halfCell,
+                        w - padR, yCenter + halfCell,
+                        blackKeyBgP
+                    )
+                }
+
+                // グリッドライン
+                if (isC) {
+                    c.drawLine(labelW, yCenter, w - padR, yCenter, gridCLineP)
+                } else {
+                    c.drawLine(labelW, yCenter, w - padR, yCenter, gridP)
+                }
+
+                // ラベル（白鍵のみ）
+                if (!isBlack) {
+                    val octNum = (m / 12) - 1
+                    val label = if (isC) "C$octNum" else NOTE_NAMES_ALL[ni]
+                    val paint = if (isC) labelCP else labelNormP
+                    c.drawText(label, labelW - 4f, yCenter + 5f, paint)
+                }
+            }
+
+            // ── 音符トレイル（折れ線） ──
+            val step = graphW / (PITCH_HISTORY_SIZE - 1).toFloat()
+            val path = Path()
+            var pathStarted = false
+
+            for (i in data.indices) {
+                val r = data[i]
+                if (r == null) {
+                    // null で折れ線を切断
+                    pathStarted = false
+                    continue
+                }
+                val x = labelW + i * step
+                val y = midiToY(r.midiNumber + r.centsDiff / 100f)
+
+                if (!pathStarted) {
+                    path.moveTo(x, y)
+                    pathStarted = true
+                } else {
+                    path.lineTo(x, y)
+                }
+            }
+            c.drawPath(path, trailP)
+
+            // ── 各フレームのドット ──
             for (i in data.indices) {
                 val r = data[i] ?: continue
-                val x = lp + i * step; val yy = y(r.midiNumber + r.centsDiff / 100f)
-                val a = (0.3f + 0.7f * i / data.size * 255).toInt().coerceIn(0, 255)
-                dotP.color = when { abs(r.centsDiff) < 5f -> Color.parseColor("#4CAF50"); abs(r.centsDiff) < 15f -> Color.parseColor("#FFC107"); else -> Color.parseColor("#FF5722") }
-                dotP.alpha = a; c.drawCircle(x, yy, 4f, dotP)
-                if (!started) { path.moveTo(x, yy); started = true } else path.lineTo(x, yy)
-            }
-            if (started) c.drawPath(path, lnP)
+                val x = labelW + i * step
+                val y = midiToY(r.midiNumber + r.centsDiff / 100f)
 
-            val latest = data.lastOrNull { it != null } ?: return
-            val li = data.indexOfLast { it != null }
-            val lx = lp + li * step; val ly = y(latest.midiNumber + latest.centsDiff / 100f)
-            glowP.color = Color.parseColor("#4CAF50")
-            glowP.alpha = 50; c.drawCircle(lx, ly, 20f, glowP)
-            glowP.alpha = 120; c.drawCircle(lx, ly, 12f, glowP)
-            glowP.alpha = 255; c.drawCircle(lx, ly, 7f, glowP)
-            val badge = "${latest.noteName}${latest.octave}"
-            val tw = badgeP.measureText(badge)
-            val bx = (lx + 12f).coerceAtMost(w - tw - 16f)
-            val by = (ly - 16f).coerceAtLeast(tp + 24f)
-            c.drawRoundRect(bx - 4f, by - 20f, bx + tw + 4f, by + 4f, 8f, 8f, badgeBgP)
-            c.drawText(badge, bx, by, badgeP)
+                // 新しいほど不透明
+                val alpha = (80 + 175 * i / data.size.coerceAtLeast(1))
+                    .coerceIn(0, 255)
+
+                val dotColor = when {
+                    kotlin.math.abs(r.centsDiff) < 5f  -> Color.parseColor("#4CAF50")
+                    kotlin.math.abs(r.centsDiff) < 15f -> Color.parseColor("#FFC107")
+                    else                               -> Color.parseColor("#FF5722")
+                }
+                dotP.color = dotColor
+                dotP.alpha = alpha
+                c.drawCircle(x, y, 3.5f, dotP)
+            }
+
+            // ── 最新ドット（グロー付き） ──
+            if (latest != null) {
+                val li = data.indexOfLast { it != null }
+                val lx = labelW + li * step
+                val ly = midiToY(latest.midiNumber + latest.centsDiff / 100f)
+
+                val glowColor = when {
+                    kotlin.math.abs(latest.centsDiff) < 5f  -> Color.parseColor("#4CAF50")
+                    kotlin.math.abs(latest.centsDiff) < 15f -> Color.parseColor("#FFC107")
+                    else                                    -> Color.parseColor("#FF5722")
+                }
+
+                // グロー3層
+                glowP.color = glowColor
+                glowP.alpha = 35;  c.drawCircle(lx, ly, 20f, glowP)
+                glowP.alpha = 90;  c.drawCircle(lx, ly, 12f, glowP)
+                glowP.alpha = 255; c.drawCircle(lx, ly, 6.5f, glowP)
+
+                // バッジ
+                val badge = "${latest.noteName}${latest.octave}"
+                val tw = badgeTextP.measureText(badge)
+                val bx = (lx + 14f).coerceAtMost(w - padR - tw - 8f)
+                val by = (ly - 14f).coerceAtLeast(padT + 22f)
+                c.drawRoundRect(bx - 5f, by - 22f, bx + tw + 5f, by + 4f, 8f, 8f, badgeBgP)
+                c.drawText(badge, bx, by, badgeTextP)
+            }
         }
     }
 
