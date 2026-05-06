@@ -238,7 +238,8 @@ class TunerOverlayService : Service() {
         val centroid: Float, val spread: Float, val rolloff: Float, val flatness: Float, val flux: Float, val mags: FloatArray,
         val melBands: FloatArray, val mfcc: FloatArray, val f1: Float, val f2: Float, val vowel: String,
         val chroma: FloatArray, val chord: String,
-        val event: String, val eventConf: Float, val speaker: String
+        val event: String, val eventConf: Float, val speaker: String,
+        val semanticFeatures: FloatArray
     )
 
     // ============================================================
@@ -288,7 +289,19 @@ class TunerOverlayService : Service() {
             val event = when { rmsDb < -45 -> "Silence"; zcr > 0.22 -> "Percussive"; pitch != null -> "Musical/Voice"; else -> "Atmo" }
             val speaker = if(pitch == null) "Other" else if(pitch.frequency < 170) "Male" else "Female"
 
-            return AnalysisResult(sampleRate, fBuf.size, "MIC/System", peakDb, rmsDb, if(rms>0) maxA/rms else 0f, lraMax-lraMin, zcr, maxA, centroid, 0f, rolloff, flatness, flux, mags, mel, mfcc, f1, f2, vowel, chroma, "C (est)", event, 0.9f, speaker)
+            val sr = sampleRate.toFloat() / 2f
+            val semanticFeatures = floatArrayOf(
+                ((rmsDb + 60f) / 60f).coerceIn(0f, 1f),
+                zcr.coerceIn(0f, 1f),
+                (centroid / sr).coerceIn(0f, 1f),
+                flatness.coerceIn(0f, 1f),
+                (flux / 500f).coerceIn(0f, 1f),
+                maxA.coerceIn(0f, 1f),
+                if (pitch != null) 1f else 0.1f,
+                ((lraMax - lraMin) / 20f).coerceIn(0f, 1f)
+            )
+
+            return AnalysisResult(sampleRate, fBuf.size, "MIC/System", peakDb, rmsDb, if(rms>0) maxA/rms else 0f, lraMax-lraMin, zcr, maxA, centroid, 0f, rolloff, flatness, flux, mags, mel, mfcc, f1, f2, vowel, chroma, "C (est)", event, 0.9f, speaker, semanticFeatures)
         }
 
         private fun performFft(r: FloatArray, m: FloatArray) {
@@ -322,8 +335,15 @@ class TunerOverlayService : Service() {
 
     inner class L2PanelView(ctx: Context) : LinearLayout(ctx) {
         private val mP = MeterBar(ctx, "Peak"); private val mR = MeterBar(ctx, "RMS")
-        private val info = TextView(ctx).apply { setTextColor(Color.WHITE); textSize = 12f; setPadding(20, 0, 0, 0) }
-        init { orientation = HORIZONTAL; setPadding(20, 20, 20, 20); addView(mP); addView(mR); addView(info) }
+        private val info = TextView(ctx).apply { setTextColor(Color.WHITE); textSize = 12f }
+        init {
+            val dp = resources.displayMetrics.density
+            orientation = HORIZONTAL
+            setPadding((8 * dp).toInt(), (8 * dp).toInt(), (8 * dp).toInt(), (8 * dp).toInt())
+            addView(mP, LayoutParams((30 * dp).toInt(), LayoutParams.MATCH_PARENT))
+            addView(mR, LayoutParams((30 * dp).toInt(), LayoutParams.MATCH_PARENT).apply { marginStart = (4 * dp).toInt() })
+            addView(info, LayoutParams(0, LayoutParams.WRAP_CONTENT, 1f).apply { marginStart = (8 * dp).toInt() })
+        }
         fun update(f: AnalysisResult) {
             mP.setValue(f.peakDbfs); mR.setValue(f.rmsDbfs)
             info.text = "Peak: %.1f dBFS\nRMS: %.1f dBFS\nLUFS: %.1f (K-weighted approx)\nLRA: %.1f dB\nCrest: %.2f".format(f.peakDbfs, f.rmsDbfs, f.rmsDbfs-3f, f.lra, f.crestFactor)
@@ -365,7 +385,7 @@ class TunerOverlayService : Service() {
             addView(info, LayoutParams(0, LayoutParams.WRAP_CONTENT, 1f))
         }
         fun update(f: AnalysisResult) {
-            radar.setValues(f.mfcc)
+            radar.setValues(f.semanticFeatures)
             info.text = "Event: ${f.event}\nConf: ${(f.eventConf*100).toInt()}%\nSpeaker: ${f.speaker}\n\n[LOG]\n- ${f.event} detected"
         }
     }
@@ -385,7 +405,15 @@ class TunerOverlayService : Service() {
             color = when { db >= 0 -> Color.RED; db >= -3 -> Color.YELLOW; else -> Color.GREEN }
             invalidate()
         }
-        override fun onMeasure(w: Int, h: Int) = setMeasuredDimension((30 * resources.displayMetrics.density).toInt(), -1)
+        override fun onMeasure(w: Int, h: Int) {
+            val dp = resources.displayMetrics.density
+            val measuredW = (30 * dp).toInt()
+            val measuredH = if (MeasureSpec.getMode(h) == MeasureSpec.UNSPECIFIED)
+                (120 * dp).toInt()
+            else
+                MeasureSpec.getSize(h)
+            setMeasuredDimension(measuredW, measuredH)
+        }
     }
 
     inner class SimpleLineGraph(ctx: Context, val color: Int) : View(ctx) {
@@ -409,29 +437,43 @@ class TunerOverlayService : Service() {
     }
 
     inner class RadarChart(ctx: Context) : View(ctx) {
-        private var data = FloatArray(12)
+        private var data = FloatArray(8)
+        private val labels = arrayOf("Vol","ZCR","Bright","Flat","Flux","Env","Music","LRA")
         override fun onDraw(c: Canvas) {
-            val cx = width/2f; val cy = height/2f; val r = min(cx, cy)*0.8f
+            val cx = width/2f; val cy = height/2f; val r = min(cx, cy)*0.75f
+            val n = data.size
             val p = Path()
-            val maxV = data.maxOfOrNull { abs(it) }?.coerceAtLeast(1e-6f) ?: 1e-6f
-            for (i in 0 until 12) {
-                val ang = i * 2 * PI / 12 - PI / 2
-                val dr = (abs(data[i]) / maxV) * r
+            val maxV = data.maxOrNull()?.coerceAtLeast(1e-6f) ?: 1e-6f
+            for (i in 0 until n) {
+                val ang = i * 2.0 * PI / n - PI / 2
+                val dr = (data[i].coerceAtLeast(0f) / maxV) * r
                 val x = cx + dr * cos(ang).toFloat()
                 val y = cy + dr * sin(ang).toFloat()
                 if (x.isNaN() || y.isNaN()) return
                 if (i == 0) p.moveTo(x, y) else p.lineTo(x, y)
             }
             p.close()
+            // 背景グリッド
+            val gridP = Paint().apply { color = Color.parseColor("#333333"); style = Paint.Style.STROKE; strokeWidth = 1f }
+            for (level in 1..4) {
+                val gr = r * level / 4f; val gp = Path()
+                for (i in 0 until n) {
+                    val ang = i * 2.0 * PI / n - PI / 2
+                    val x = cx + gr * cos(ang).toFloat()
+                    val y = cy + gr * sin(ang).toFloat()
+                    if (i == 0) gp.moveTo(x, y) else gp.lineTo(x, y)
+                }
+                gp.close(); c.drawPath(gp, gridP)
+            }
+            c.drawPath(p, Paint().apply { color = Color.parseColor("#4CAF5088"); style = Paint.Style.FILL })
             c.drawPath(p, Paint().apply { color = Color.GREEN; style = Paint.Style.STROKE; strokeWidth = 2f })
-            
-            val notes = arrayOf("C","C#","D","D#","E","F","F#","G","G#","A","A#","B")
-            val tp = Paint().apply { color = Color.parseColor("#888888"); textSize = 20f; textAlign = Paint.Align.CENTER }
-            for (i in 0 until 12) {
-                val ang = i * 2 * PI / 12 - PI / 2
-                c.drawText(notes[i], cx + (r+20f)*cos(ang).toFloat(), cy + (r+20f)*sin(ang).toFloat() + 6f, tp)
+            // ラベル
+            val tp = Paint().apply { color = Color.parseColor("#AAAAAA"); textSize = 18f; textAlign = Paint.Align.CENTER }
+            for (i in 0 until n) {
+                val ang = i * 2.0 * PI / n - PI / 2
+                c.drawText(labels[i % labels.size], cx + (r+22f)*cos(ang).toFloat(), cy + (r+22f)*sin(ang).toFloat() + 6f, tp)
             }
         }
-        fun setValues(v: FloatArray) { data = if (v.size == 12) v.clone() else FloatArray(12); invalidate() }
+        fun setValues(v: FloatArray) { data = v.clone(); invalidate() }
     }
 }
