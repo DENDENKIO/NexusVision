@@ -37,32 +37,26 @@ class LiveTranslateService : Service() {
 
         private const val SAMPLE_RATE = 16000
         private const val VAD_WINDOW = 512
-        private const val TRANSLATE_THROTTLE_MS = 1000L
+        private const val TRANSLATE_THROTTLE_MS = 800L
 
-        // SenseVoice が付与するタグ（除去用）
-        private val SENSE_VOICE_TAG_REGEX = Regex(
-            "<\\|[^|]*\\|>|\\[\\w+\\]"
-        )
+        // SenseVoice タグ除去
+        private val SENSE_VOICE_TAG_REGEX = Regex("<\\|[^|]*\\|>|\\[\\w+\\]")
+
+        // ★ 1文を区切る最大文字数（これを超えたら句読点・スペースで分割）
+        private const val MAX_CHUNK_CHARS = 40
     }
 
-    // sherpa-onnx (offline = SenseVoice)
     private var recognizer: OfflineRecognizer? = null
-
-    // Silero VAD
     private var vad: Vad? = null
-
-    // AudioPlaybackCapture
     private var mediaProjection: MediaProjection? = null
     private var audioRecord: AudioRecord? = null
     private var captureThread: Thread? = null
     @Volatile private var isCapturing = false
 
-    // Translation
     private var translator: Translator? = null
     private var lastTranslateTime = 0L
     private var lastTranslatedText = ""
 
-    // UI
     private var windowManager: WindowManager? = null
     private var overlayView: View? = null
     private var floatingButton: View? = null
@@ -71,6 +65,9 @@ class LiveTranslateService : Service() {
     private var statusTextView: TextView? = null
     private var isCurrentlyListening = false
     private var currentButtonBg: View? = null
+
+    // ★ オーバーレイ ドラッグ用
+    private var overlayParams: WindowManager.LayoutParams? = null
 
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -93,10 +90,8 @@ class LiveTranslateService : Service() {
                     return START_NOT_STICKY
                 }
 
-                // ① まず Foreground Service を開始
                 startForegroundNotification()
 
-                // ② Foreground 状態になった後で MediaProjection を取得
                 try {
                     val pm = getSystemService(Context.MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
                     mediaProjection = pm.getMediaProjection(Activity.RESULT_OK, resultData)
@@ -126,10 +121,12 @@ class LiveTranslateService : Service() {
                 sileroVadModelConfig = SileroVadModelConfig(
                     model = "silero_vad.onnx",
                     threshold = 0.4f,
-                    minSilenceDuration = 0.3f,
-                    minSpeechDuration = 0.25f,
+                    // ★ 短い無音で区切る → 短文ごとに認識
+                    minSilenceDuration = 0.15f,
+                    minSpeechDuration = 0.15f,
                     windowSize = VAD_WINDOW,
-                    maxSpeechDuration = 15.0f,
+                    // ★ 最大発話長を短く → 長文防止
+                    maxSpeechDuration = 5.0f,
                 ),
                 sampleRate = SAMPLE_RATE,
                 numThreads = 1,
@@ -140,11 +137,7 @@ class LiveTranslateService : Service() {
 
             val senseVoiceDir = "sherpa-onnx-sense-voice-zh-en-ja-ko-yue-int8-2024-07-17"
             val senseVoiceLang = when (sourceLang.lowercase().take(2)) {
-                "ja" -> "ja"
-                "en" -> "en"
-                "zh" -> "zh"
-                "ko" -> "ko"
-                else -> "auto"
+                "ja" -> "ja"; "en" -> "en"; "zh" -> "zh"; "ko" -> "ko"; else -> "auto"
             }
             val offlineConfig = OfflineRecognizerConfig(
                 featConfig = FeatureConfig(sampleRate = SAMPLE_RATE, featureDim = 80),
@@ -163,7 +156,6 @@ class LiveTranslateService : Service() {
             )
             recognizer = OfflineRecognizer(assetManager = assets, config = offlineConfig)
             Log.i(TAG, "SenseVoice initialized (lang=$senseVoiceLang)")
-
             updateStatus("STTエンジン準備完了")
         } catch (e: Exception) {
             Log.e(TAG, "sherpa-onnx init FAILED: ${e.message}", e)
@@ -172,23 +164,49 @@ class LiveTranslateService : Service() {
     }
 
     // ============================================================
-    //  SenseVoice テキストクリーニング
+    //  テキストクリーニング & 分割
     // ============================================================
     private fun cleanSenseVoiceText(raw: String): String {
-        // <|en|><|NEUTRAL|><|Speech|><|woitn|> などのタグを除去
         return SENSE_VOICE_TAG_REGEX.replace(raw, "").trim()
+    }
+
+    /**
+     * 長いテキストを句読点・ピリオド・スペース区切りで短いチャンクに分割
+     */
+    private fun splitIntoChunks(text: String): List<String> {
+        if (text.length <= MAX_CHUNK_CHARS) return listOf(text)
+
+        val chunks = mutableListOf<String>()
+        // 句読点・ピリオド・疑問符・感嘆符・カンマで分割
+        val delimiters = Regex("[.!?;,。、！？；，]+\\s*")
+        val parts = delimiters.split(text).filter { it.isNotBlank() }
+
+        if (parts.size <= 1) {
+            // 句読点がない場合はスペースで区切って MAX_CHUNK_CHARS 以内にまとめる
+            val words = text.split("\\s+".toRegex())
+            val sb = StringBuilder()
+            for (word in words) {
+                if (sb.length + word.length + 1 > MAX_CHUNK_CHARS && sb.isNotEmpty()) {
+                    chunks.add(sb.toString().trim())
+                    sb.clear()
+                }
+                if (sb.isNotEmpty()) sb.append(" ")
+                sb.append(word)
+            }
+            if (sb.isNotEmpty()) chunks.add(sb.toString().trim())
+        } else {
+            chunks.addAll(parts.map { it.trim() })
+        }
+
+        return chunks.filter { it.isNotBlank() }
     }
 
     // ============================================================
     //  AudioPlaybackCapture + VAD + SenseVoice
     // ============================================================
     private fun startSystemAudioCapture() {
-        if (mediaProjection == null) {
-            updateStatus("MediaProjection エラー"); return
-        }
-        if (recognizer == null || vad == null) {
-            updateStatus("STTエンジン未初期化"); return
-        }
+        if (mediaProjection == null) { updateStatus("MediaProjection エラー"); return }
+        if (recognizer == null || vad == null) { updateStatus("STTエンジン未初期化"); return }
 
         try {
             val captureConfig = AudioPlaybackCaptureConfiguration.Builder(mediaProjection!!)
@@ -222,20 +240,20 @@ class LiveTranslateService : Service() {
             audioRecord?.startRecording()
 
             captureThread = Thread({
-                Log.i(TAG, "=== Capture thread started (VAD + SenseVoice) ===")
+                Log.i(TAG, "=== Capture thread started ===")
                 val shortBuffer = ShortArray(VAD_WINDOW)
 
                 while (isCapturing) {
                     val read = audioRecord?.read(shortBuffer, 0, VAD_WINDOW) ?: -1
                     if (read > 0) {
                         val floatBuffer = FloatArray(read) { shortBuffer[it] / 32768.0f }
-
                         vad?.acceptWaveform(floatBuffer)
 
                         while (vad?.empty() == false) {
                             val segment = vad!!.front()
                             vad!!.pop()
-                            Log.d(TAG, "VAD segment: ${segment.samples.size} samples (${segment.samples.size / SAMPLE_RATE.toFloat()}s)")
+                            val duration = segment.samples.size / SAMPLE_RATE.toFloat()
+                            Log.d(TAG, "VAD segment: ${segment.samples.size} samples (${duration}s)")
 
                             val stream = recognizer!!.createStream()
                             stream.acceptWaveform(segment.samples, SAMPLE_RATE)
@@ -243,13 +261,16 @@ class LiveTranslateService : Service() {
                             val result = recognizer!!.getResult(stream)
                             stream.release()
 
-                            // ★ タグ除去してクリーンなテキストを取得
                             val text = cleanSenseVoiceText(result.text)
                             if (text.isNotEmpty()) {
-                                Log.i(TAG, "STT RAW : \"${result.text}\"")
-                                Log.i(TAG, "STT CLEAN: \"$text\" (lang=${result.lang})")
-                                Handler(Looper.getMainLooper()).post {
-                                    onSpeechResult(text, true)
+                                Log.i(TAG, "STT CLEAN: \"$text\"")
+                                // ★ 長文を分割して順次表示
+                                val chunks = splitIntoChunks(text)
+                                for ((i, chunk) in chunks.withIndex()) {
+                                    val delay = i * 600L // 600ms間隔で表示
+                                    Handler(Looper.getMainLooper()).postDelayed({
+                                        onSpeechResult(chunk, true)
+                                    }, delay)
                                 }
                             }
                         }
@@ -264,7 +285,6 @@ class LiveTranslateService : Service() {
                 Log.i(TAG, "=== Capture thread stopped ===")
             }, "VadSenseVoiceCapture")
             captureThread?.start()
-
             updateStatus("システム音声キャプチャ中...")
         } catch (e: Exception) {
             Log.e(TAG, "Capture start failed: ${e.message}", e)
@@ -290,7 +310,6 @@ class LiveTranslateService : Service() {
     // ============================================================
     private fun onSpeechResult(text: String, isFinal: Boolean) {
         originalTextView?.text = text
-        Log.d(TAG, "STT: \"$text\"")
 
         val now = System.currentTimeMillis()
         if (text == lastTranslatedText) return
@@ -301,10 +320,9 @@ class LiveTranslateService : Service() {
 
         translator?.translate(text)
             ?.addOnSuccessListener { translated ->
-                // ★ 翻訳結果が原文とほぼ同じなら表示しない（英→英防止）
                 if (translated.equals(text, ignoreCase = true) ||
                     translated.trim().lowercase() == text.trim().lowercase()) {
-                    Log.w(TAG, "Translation same as source, skipping: \"$text\"")
+                    Log.w(TAG, "Translation same as source, skipping")
                     translatedTextView?.text = ""
                     return@addOnSuccessListener
                 }
@@ -426,41 +444,104 @@ class LiveTranslateService : Service() {
     }
 
     // ============================================================
-    //  字幕オーバーレイ（★履歴削除済み・コンパクト）
+    //  ★ 字幕オーバーレイ（ドラッグ移動対応）
     // ============================================================
     private fun createSubtitleOverlay() {
         if (!Settings.canDrawOverlays(this)) return
         if (windowManager == null) windowManager = getSystemService(Context.WINDOW_SERVICE) as WindowManager
 
+        val dp = resources.displayMetrics.density
+
         val container = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setBackgroundColor(Color.parseColor("#CC000000"))
-            setPadding(24, 12, 24, 12)
+            setPadding((16 * dp).toInt(), (8 * dp).toInt(), (16 * dp).toInt(), (8 * dp).toInt())
         }
+
+        // ★ ドラッグ用ハンドル（上部の細いバー）
+        val dragHandle = TextView(this).apply {
+            text = "⋮⋮ ドラッグで移動 ⋮⋮"
+            textSize = 10f
+            setTextColor(Color.parseColor("#60FFFFFF"))
+            gravity = Gravity.CENTER
+            setPadding(0, 0, 0, (4 * dp).toInt())
+        }
+
         statusTextView = TextView(this).apply {
             setTextColor(Color.parseColor("#80FFFFFF")); textSize = 11f; text = "初期化中..."
         }
         originalTextView = TextView(this).apply {
             setTextColor(Color.parseColor("#B0B0B0")); textSize = 13f
+            // ★ 最大2行に制限
+            maxLines = 2
+            ellipsize = android.text.TextUtils.TruncateAt.END
         }
         translatedTextView = TextView(this).apply {
             setTextColor(Color.WHITE); textSize = 16f; setTypeface(null, Typeface.BOLD)
+            // ★ 最大2行に制限
+            maxLines = 2
+            ellipsize = android.text.TextUtils.TruncateAt.END
         }
 
+        container.addView(dragHandle)
         container.addView(statusTextView)
         container.addView(originalTextView)
         container.addView(translatedTextView)
-        // ★ historyView は追加しない
 
         val params = WindowManager.LayoutParams(
             WindowManager.LayoutParams.MATCH_PARENT,
             WindowManager.LayoutParams.WRAP_CONTENT,
             WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
-            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL,
+            // ★ FLAG_NOT_TOUCH_MODAL を外し、タッチを受け取れるようにする
+            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE,
             PixelFormat.TRANSLUCENT
-        ).apply { gravity = Gravity.TOP }
+        ).apply {
+            gravity = Gravity.TOP or Gravity.START
+            x = 0
+            y = 0
+        }
+        overlayParams = params
 
-        windowManager?.addView(container, params); overlayView = container
+        // ★ オーバーレイ全体をドラッグで移動可能にする
+        var touchStartX = 0f
+        var touchStartY = 0f
+        var paramStartX = 0
+        var paramStartY = 0
+        var isDragging = false
+
+        container.setOnTouchListener { _, event ->
+            when (event.action) {
+                MotionEvent.ACTION_DOWN -> {
+                    touchStartX = event.rawX
+                    touchStartY = event.rawY
+                    paramStartX = params.x
+                    paramStartY = params.y
+                    isDragging = false
+                    true
+                }
+                MotionEvent.ACTION_MOVE -> {
+                    val dx = event.rawX - touchStartX
+                    val dy = event.rawY - touchStartY
+                    if (kotlin.math.abs(dx) > 8 || kotlin.math.abs(dy) > 8) isDragging = true
+                    if (isDragging) {
+                        params.x = paramStartX + dx.toInt()
+                        params.y = paramStartY + dy.toInt()
+                        try {
+                            windowManager?.updateViewLayout(container, params)
+                        } catch (_: Exception) {}
+                    }
+                    true
+                }
+                MotionEvent.ACTION_UP -> {
+                    isDragging = false
+                    true
+                }
+                else -> false
+            }
+        }
+
+        windowManager?.addView(container, params)
+        overlayView = container
     }
 
     private fun updateStatus(text: String) {
