@@ -248,7 +248,8 @@ class TunerOverlayService : Service() {
     class FeatureExtractor(private val sampleRate: Int, private val fftSize: Int) {
         private val real = FloatArray(fftSize); private val imag = FloatArray(fftSize)
         private var prevMags = FloatArray(fftSize / 2)
-        private var lraRmsHistory = ArrayDeque<Float>(150)
+        private val lraHistory = ArrayDeque<Float>()
+        private val LRA_WINDOW = 150
         
         fun extract(fBuf: FloatArray, pitch: PitchDetector.PitchResult?, beat: BeatDetector.BeatResult): AnalysisResult {
             // L2: Loudness
@@ -257,18 +258,15 @@ class TunerOverlayService : Service() {
             val rms = sqrt(sumS / fBuf.size)
             val peakDb = 20 * log10(maxA.coerceAtLeast(1e-6f)); val rmsDb = 20 * log10(rms.coerceAtLeast(1e-6f))
             
-            if (rmsDb > -70f) lraRmsHistory.addLast(rmsDb)
-            if (lraRmsHistory.size > 150) lraRmsHistory.removeFirst()
+            if (rmsDb > -70f) lraHistory.addLast(rmsDb)
+            if (lraHistory.size > LRA_WINDOW) lraHistory.removeFirst()
             
-            val lra: Float
-            if (lraRmsHistory.size >= 10) {
-                val sorted = lraRmsHistory.sorted()
+            val lraValue: Float = if (lraHistory.size >= 5) {
+                val sorted = lraHistory.sorted()
                 val low = sorted[(sorted.size * 0.10f).toInt().coerceIn(0, sorted.size - 1)]
                 val high = sorted[(sorted.size * 0.95f).toInt().coerceIn(0, sorted.size - 1)]
-                lra = (high - low).coerceAtLeast(0f)
-            } else {
-                lra = 0f
-            }
+                (high - low).coerceAtLeast(0f)
+            } else 0f
 
             // L3: Time Domain
             var zc = 0; for (i in 1 until fBuf.size) if(fBuf[i-1]*fBuf[i] < 0) zc++
@@ -334,10 +332,10 @@ class TunerOverlayService : Service() {
                 (flux / 500f).coerceIn(0f, 1f),
                 maxA.coerceIn(0f, 1f),
                 if (pitch != null) 1f else 0.1f,
-                (lra / 20f).coerceIn(0f, 1f)
+                (lraValue / 20f).coerceIn(0f, 1f)
             )
 
-            return AnalysisResult(sampleRate, fBuf.size, "MIC/System", peakDb, rmsDb, if(rms>0) maxA/rms else 0f, lra, zcr, maxA, centroid, 0f, rolloff, flatness, flux, mags, mel, mfcc, f1, f2, vowel, chroma, "C (est)", event, 0.9f, speaker, semanticFeatures)
+            return AnalysisResult(sampleRate, fBuf.size, "MIC/System", peakDb, rmsDb, if(rms>0) maxA/rms else 0f, lraValue, zcr, maxA, centroid, 0f, rolloff, flatness, flux, mags, mel, mfcc, f1, f2, vowel, chroma, "C (est)", event, 0.9f, speaker, semanticFeatures)
         }
 
         private fun hzToMel(hz: Float) = 2595f * log10(1f + hz / 700f)
