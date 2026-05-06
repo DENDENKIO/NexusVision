@@ -480,10 +480,9 @@ class TunerOverlayService : Service() {
             val cx = width/2f; val cy = height/2f; val r = min(cx, cy)*0.75f
             val n = data.size
             val p = Path()
-            val maxV = data.maxOrNull()?.coerceAtLeast(1e-6f) ?: 1e-6f
             for (i in 0 until n) {
                 val ang = i * 2.0 * PI / n - PI / 2
-                val dr = (data[i].coerceAtLeast(0f) / maxV) * r
+                val dr = data[i].coerceIn(0f, 1f) * r
                 val x = cx + dr * cos(ang).toFloat()
                 val y = cy + dr * sin(ang).toFloat()
                 if (x.isNaN() || y.isNaN()) return
