@@ -277,7 +277,7 @@ class TunerOverlayService : Service() {
 
             // L5: Perceptual (Mel / MFCC)
             val mel = FloatArray(26); for(i in 0 until 26) mel[i] = totalM * (i+1)/300f // 簡易フィルタ代用
-            val mfcc = FloatArray(12); for(i in 0 until 12) mfcc[i] = (ln(totalM.coerceAtLeast(1e-6f)) * cos(PI*i/12f)).toFloat()
+            val mfcc = FloatArray(12); for(i in 0 until 12) mfcc[i] = abs((ln(totalM.coerceAtLeast(1e-6f)) * cos(PI*i/12f)).toFloat())
             val f1 = centroid * 0.45f; val f2 = centroid * 1.2f
             val vowel = when { zcr > 0.28f -> "Noise"; centroid > 2200 -> "i"; centroid > 1500 -> "e"; centroid > 800 -> "a"; else -> "o/u" }
 
@@ -346,7 +346,7 @@ class TunerOverlayService : Service() {
     inner class L5PanelView(ctx: Context) : LinearLayout(ctx) {
         private val mfcc = BarChart(ctx, 12, Color.YELLOW); private val info = TextView(ctx).apply { setTextColor(Color.WHITE); textSize = 12f }
         init { orientation = VERTICAL; setPadding(10, 10, 10, 10); addView(mfcc, LayoutParams(-1, 0, 1f)); addView(info) }
-        fun update(f: AnalysisResult, p: PitchDetector.PitchResult?) { mfcc.setValues(f.mfcc); info.text = "F0: ${p?.frequency?.toInt() ?: "--"} Hz | Vowel: ${f.vowel}\nF1: ${f.f1.toInt()} Hz | F2: ${f.f2.toInt()} Hz".format() }
+        fun update(f: AnalysisResult, p: PitchDetector.PitchResult?) { mfcc.setValues(f.mfcc); info.text = "F0: ${p?.frequency?.toInt() ?: "--"} Hz | Vowel: ${f.vowel}\nF1: ${f.f1.toInt()} Hz | F2: ${f.f2.toInt()} Hz" }
     }
 
     inner class L6PanelView(ctx: Context) : LinearLayout(ctx) {
@@ -356,9 +356,18 @@ class TunerOverlayService : Service() {
     }
 
     inner class L7PanelView(ctx: Context) : LinearLayout(ctx) {
-        private val radar = RadarChart(ctx); private val info = TextView(ctx).apply { setTextColor(Color.WHITE); textSize = 12f }
-        init { orientation = HORIZONTAL; setPadding(20, 20, 20, 20); addView(radar, LayoutParams(0, -1, 1.2f)); addView(info, LayoutParams(0, -1, 1f)) }
-        fun update(f: AnalysisResult) { radar.setValues(f.mfcc); info.text = "Event: ${f.event}\nConf: ${(f.eventConf*100).toInt()}%\nSpeaker: ${f.speaker}\n\n[LOG]\n- Event Detected".format() }
+        private val radar = RadarChart(ctx)
+        private val info = TextView(ctx).apply { setTextColor(Color.WHITE); textSize = 12f }
+        init {
+            orientation = HORIZONTAL
+            setPadding(20, 20, 20, 20)
+            addView(radar, LayoutParams(0, LayoutParams.MATCH_PARENT, 1.2f))
+            addView(info, LayoutParams(0, LayoutParams.WRAP_CONTENT, 1f))
+        }
+        fun update(f: AnalysisResult) {
+            radar.setValues(f.mfcc)
+            info.text = "Event: ${f.event}\nConf: ${(f.eventConf*100).toInt()}%\nSpeaker: ${f.speaker}\n\n[LOG]\n- ${f.event} detected"
+        }
     }
 
     // --- Components ---
@@ -402,10 +411,27 @@ class TunerOverlayService : Service() {
     inner class RadarChart(ctx: Context) : View(ctx) {
         private var data = FloatArray(12)
         override fun onDraw(c: Canvas) {
-            val cx = width/2f; val cy = height/2f; val r = min(cx, cy)*0.8f; val p = Path(); val maxV = (data.maxOrNull() ?: 1e-6f)
-            for(i in 0 until 12) { val ang = i*2*PI/12-PI/2; val dr = (data[i]/maxV)*r; val x = cx+dr*cos(ang).toFloat(); val y = cy+dr*sin(ang).toFloat(); if(i==0) p.moveTo(x,y) else p.lineTo(x,y) }
-            p.close(); c.drawPath(p, Paint().apply { color=Color.GREEN; style=Paint.Style.STROKE; strokeWidth=2f })
+            val cx = width/2f; val cy = height/2f; val r = min(cx, cy)*0.8f
+            val p = Path()
+            val maxV = data.maxOfOrNull { abs(it) }?.coerceAtLeast(1e-6f) ?: 1e-6f
+            for (i in 0 until 12) {
+                val ang = i * 2 * PI / 12 - PI / 2
+                val dr = (abs(data[i]) / maxV) * r
+                val x = cx + dr * cos(ang).toFloat()
+                val y = cy + dr * sin(ang).toFloat()
+                if (x.isNaN() || y.isNaN()) return
+                if (i == 0) p.moveTo(x, y) else p.lineTo(x, y)
+            }
+            p.close()
+            c.drawPath(p, Paint().apply { color = Color.GREEN; style = Paint.Style.STROKE; strokeWidth = 2f })
+            
+            val notes = arrayOf("C","C#","D","D#","E","F","F#","G","G#","A","A#","B")
+            val tp = Paint().apply { color = Color.parseColor("#888888"); textSize = 20f; textAlign = Paint.Align.CENTER }
+            for (i in 0 until 12) {
+                val ang = i * 2 * PI / 12 - PI / 2
+                c.drawText(notes[i], cx + (r+20f)*cos(ang).toFloat(), cy + (r+20f)*sin(ang).toFloat() + 6f, tp)
+            }
         }
-        fun setValues(v: FloatArray) { data = v; invalidate() }
+        fun setValues(v: FloatArray) { data = if (v.size == 12) v.clone() else FloatArray(12); invalidate() }
     }
 }
