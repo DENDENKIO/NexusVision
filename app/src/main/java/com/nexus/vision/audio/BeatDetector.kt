@@ -7,6 +7,7 @@ import kotlin.math.*
  * - FFTで低域/中域/高域に分離してオンセット検出
  * - 直近エネルギー平均の倍率で適応的に閾値を算出
  * - BPMから予測ビートグリッドを生成し、正確度を採点
+ * - ACFによるBPM算出とPLLによるグリッド追跡
  */
 class BeatDetector(private val sampleRate: Int) {
 
@@ -26,12 +27,18 @@ class BeatDetector(private val sampleRate: Int) {
         val confidence: Float,
         val beats: List<BeatEvent>,
         val averageAccuracy: Float,
-        val predictedBeatIntervalMs: Long,   // BPMから算出した1拍の長さ
+        val predictedBeatIntervalMs: Long,   // 推定周期
         val lowFlux: Float,                  // 現在の低域フラックス（可視化用）
         val midFlux: Float,                  // 現在の中域フラックス
         val highFlux: Float,                 // 現在の高域フラックス
-        val fluxThreshold: Float             // 現在の適応的閾値
-    )
+        val fluxThreshold: Float,            // 現在の適応的閾値
+        val phaseState: BeatPhaseTracker.PhaseState
+    ) {
+        val beatPhase get() = phaseState.beatPhase
+        val barPhase get() = phaseState.barPhase
+        val beatNumber get() = phaseState.beatNumber
+        val nextBeatMs get() = phaseState.nextBeatMs
+    }
 
     data class BeatEvent(
         val timeMs: Long,
@@ -66,13 +73,16 @@ class BeatDetector(private val sampleRate: Int) {
     private var currentBpm = 0f
     private var bpmConfidence = 0f
 
-    // 予測グリッド
-    private var gridAnchorMs = 0L  // グリッド基準時刻
+    // 位相トラッカー
+    val phaseTracker = BeatPhaseTracker()
 
     /**
      * 音声フレームを解析
      */
-    fun analyze(samples: FloatArray): BeatResult {
+    fun analyze(samples: FloatArray, frameStartTimeMs: Long): BeatResult {
+        val frameDurationMs = (samples.size * 1000L) / sampleRate
+        val frameEndTimeMs = frameStartTimeMs + frameDurationMs
+
         // --- 1. FFT ---
         val n = min(samples.size, FFT_SIZE)
         for (i in 0 until FFT_SIZE) {
@@ -104,7 +114,6 @@ class BeatDetector(private val sampleRate: Int) {
         val lowFlux = max(0f, lowE - prevLowEnergy)
         val midFlux = max(0f, midE - prevMidEnergy)
         val highFlux = max(0f, highE - prevHighEnergy)
-        // 低域に重み付け（キック＝ビートの核）
         val combinedFlux = lowFlux * 2.0f + midFlux * 1.0f + highFlux * 0.5f
 
         prevLowEnergy = lowE
@@ -119,18 +128,18 @@ class BeatDetector(private val sampleRate: Int) {
         fluxHistory.addLast(combinedFlux)
 
         // --- 5. オンセット検出 ---
-        val now = System.currentTimeMillis()
-        val isOnset = combinedFlux > threshold && (now - lastOnsetTimeMs) > MIN_ONSET_INTERVAL_MS
+        val onsetTimeMs = frameStartTimeMs + frameDurationMs / 2L
+        val isOnset = combinedFlux > threshold && (onsetTimeMs - lastOnsetTimeMs) > MIN_ONSET_INTERVAL_MS
 
         if (isOnset) {
-            val interval = now - lastOnsetTimeMs
+            val interval = onsetTimeMs - lastOnsetTimeMs
             val minInterval = 60_000L / MAX_BPM
             val maxInterval = 60_000L / MIN_BPM
 
             if (lastOnsetTimeMs > 0 && interval in minInterval..maxInterval) {
                 if (intervalHistory.size >= INTERVAL_HISTORY) intervalHistory.removeFirst()
                 intervalHistory.addLast(interval)
-                updateBpm()
+                updateBpmWithACF()
             }
 
             // どの帯域が主因か判定
@@ -140,98 +149,90 @@ class BeatDetector(private val sampleRate: Int) {
                 else -> Band.HIGH
             }
 
-            // 予測グリッドとのズレから正確度算出
-            val accuracy = calculateAccuracy(now)
-
             val strength = (combinedFlux / (avgFlux * 4f + 0.001f)).coerceIn(0f, 1f)
 
-            val event = BeatEvent(timeMs = now, strength = strength, accuracy = accuracy, band = band)
+            // phaseTrackerに通知
+            phaseTracker.onBeat(onsetTimeMs, strength)
+
+            // 正確度算出（トラッカーの位相を利用）
+            val stateAtOnset = phaseTracker.getState(onsetTimeMs)
+            val accuracy = 1f - (abs(stateAtOnset.beatPhase - 0.5f) * 2f).coerceIn(0f, 1f)
+
+            val event = BeatEvent(timeMs = onsetTimeMs, strength = strength, accuracy = accuracy, band = band)
             synchronized(beatEvents) {
                 if (beatEvents.size >= MAX_BEATS) beatEvents.removeFirst()
                 beatEvents.addLast(event)
             }
 
-            // グリッド基準点を更新（高精度ビートの場合）
-            if (accuracy > 0.8f && currentBpm > 0) {
-                gridAnchorMs = now
-            }
-
-            lastOnsetTimeMs = now
+            lastOnsetTimeMs = onsetTimeMs
         }
 
         val beats = synchronized(beatEvents) { beatEvents.toList() }
-        val recentBeats = beats.filter { now - it.timeMs < 10000 }
+        val recentBeats = beats.filter { frameEndTimeMs - it.timeMs < 10000 }
         val avgAcc = if (recentBeats.isEmpty()) 0f else recentBeats.takeLast(16).map { it.accuracy }.average().toFloat()
-        val predictedInterval = if (currentBpm > 0) (60_000.0 / currentBpm).toLong() else 0L
+
+        // 返却時に現在の状態を取得
+        val phaseState = phaseTracker.getState(frameEndTimeMs)
 
         return BeatResult(
-            bpm = currentBpm,
-            confidence = bpmConfidence,
+            bpm = if (phaseState.confidence > 0.3f) phaseState.bpm else currentBpm,
+            confidence = max(phaseState.confidence, bpmConfidence),
             beats = beats,
             averageAccuracy = avgAcc,
-            predictedBeatIntervalMs = predictedInterval,
+            predictedBeatIntervalMs = phaseState.periodMs.toLong(),
             lowFlux = lowFlux,
             midFlux = midFlux,
             highFlux = highFlux,
-            fluxThreshold = threshold
+            fluxThreshold = threshold,
+            phaseState = phaseState
         )
     }
 
     /**
-     * BPM算出（加重中央値 + 平滑化）
+     * ACF（自己相関）ベースのBPM算出
      */
-    private fun updateBpm() {
-        if (intervalHistory.size < 4) return
-        val sorted = intervalHistory.sorted()
-        // 四分位範囲で外れ値を除去
-        val q1 = sorted[sorted.size / 4]
-        val q3 = sorted[sorted.size * 3 / 4]
-        val iqr = q3 - q1
-        val filtered = sorted.filter { it >= q1 - iqr * 1.5 && it <= q3 + iqr * 1.5 }
-        if (filtered.isEmpty()) return
-
-        val median = if (filtered.size % 2 == 0) {
-            (filtered[filtered.size / 2 - 1] + filtered[filtered.size / 2]) / 2.0
-        } else filtered[filtered.size / 2].toDouble()
-
-        val bpm = (60_000.0 / median).toFloat()
-        if (bpm in MIN_BPM.toFloat()..MAX_BPM.toFloat()) {
-            currentBpm = if (currentBpm == 0f) bpm else currentBpm * 0.75f + bpm * 0.25f
-
-            // 信頼度: フィルタ後の変動係数
-            val mean = filtered.average()
-            val variance = filtered.map { (it - mean).toDouble().pow(2) }.average()
-            val cv = sqrt(variance) / (mean + 1.0)
-            bpmConfidence = (1.0 - cv * 2.0).coerceIn(0.0, 1.0).toFloat()
+    private fun updateBpmWithACF() {
+        if (intervalHistory.size < 8) return
+        val intervals = intervalHistory.toList()
+        var bestBpm = currentBpm.takeIf { it > 0 } ?: 120f
+        var bestScore = -1f
+        
+        for (bpmCandidate in MIN_BPM..MAX_BPM) {
+            val expectedMs = 60_000.0 / bpmCandidate
+            var score = 0f
+            for (iv in intervals) {
+                val multiples = listOf(1.0, 2.0, 0.5, 1.5, 3.0)
+                val minErr = multiples.minOf { m ->
+                    abs(iv - expectedMs * m) / (expectedMs * m)
+                }.toFloat()
+                score += (1f - minErr.coerceAtMost(1f))
+            }
+            score /= intervals.size
+            if (score > bestScore) {
+                bestScore = score
+                bestBpm = bpmCandidate.toFloat()
+            }
         }
+        currentBpm = if (currentBpm == 0f) bestBpm else currentBpm * 0.6f + bestBpm * 0.4f
+        bpmConfidence = bestScore.coerceIn(0f, 1f)
     }
 
     /**
-     * 予測グリッドとのズレから正確度を算出
+     * 位相トラッカーのタップテンポ
      */
-    private fun calculateAccuracy(now: Long): Float {
-        if (currentBpm <= 0 || gridAnchorMs == 0L) return 0.5f
-        val intervalMs = 60_000.0 / currentBpm
-        val elapsed = (now - gridAnchorMs).toDouble()
-        val beats = elapsed / intervalMs
-        val fraction = beats - floor(beats) // 0.0-1.0 の範囲で拍内の位置
-        // 0.0 or 1.0 に近いほど正確
-        val deviation = min(fraction, 1.0 - fraction) // 0.0=ジャスト, 0.5=最大ズレ
-        return (1.0 - deviation * 2.0).coerceIn(0.0, 1.0).toFloat()
+    fun tapTempo(nowMs: Long) {
+        phaseTracker.tapTempo(nowMs)
     }
 
     fun reset() {
         synchronized(beatEvents) { beatEvents.clear() }
         fluxHistory.clear(); intervalHistory.clear()
         prevLowEnergy = 0f; prevMidEnergy = 0f; prevHighEnergy = 0f
-        lastOnsetTimeMs = 0L; currentBpm = 0f; bpmConfidence = 0f; gridAnchorMs = 0L
+        lastOnsetTimeMs = 0L; currentBpm = 0f; bpmConfidence = 0f
+        phaseTracker.reset()
     }
 
-    // ============================================================
-    //  簡易 FFT（Cooley-Tukey、2のべき乗サイズ限定）
-    // ============================================================
     private fun fft(real: FloatArray, imag: FloatArray, n: Int) {
-        // ビット反転並べ替え
         var j = 0
         for (i in 0 until n) {
             if (i < j) {
@@ -242,7 +243,7 @@ class BeatDetector(private val sampleRate: Int) {
             while (m >= 1 && j >= m) { j -= m; m = m shr 1 }
             j += m
         }
-        // バタフライ演算
+        // Original FFT implementation from viewed file
         var step = 1
         while (step < n) {
             val halfStep = step

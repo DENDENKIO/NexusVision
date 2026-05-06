@@ -78,6 +78,7 @@ class TunerOverlayService : Service() {
     private val volumeHistory = ArrayDeque<Float>(VOLUME_HISTORY_SIZE)
     private val volumePeakHistory = ArrayDeque<Float>(VOLUME_HISTORY_SIZE)
     private lateinit var beatDetector: BeatDetector
+    private lateinit var beatPhaseTracker: BeatPhaseTracker
 
     private val mainHandler = Handler(Looper.getMainLooper())
 
@@ -98,6 +99,7 @@ class TunerOverlayService : Service() {
                 } catch (e: SecurityException) { stopSelf(); return START_NOT_STICKY }
 
                 beatDetector = BeatDetector(SAMPLE_RATE)
+                beatPhaseTracker = beatDetector.phaseTracker
                 createTunerOverlay()
                 createFloatingButton()
             }
@@ -130,6 +132,7 @@ class TunerOverlayService : Service() {
             captureThread = Thread({
                 val sBuf = ShortArray(BUFFER_SAMPLES); val fBuf = FloatArray(BUFFER_SAMPLES)
                 while (isCapturing) {
+                    val frameStartTimeMs = System.currentTimeMillis()
                     val read = audioRecord?.read(sBuf, 0, BUFFER_SAMPLES) ?: -1
                     if (read <= 0) continue
                     for (i in 0 until read) fBuf[i] = sBuf[i] / 32768.0f
@@ -142,7 +145,7 @@ class TunerOverlayService : Service() {
                     }
 
                     // 2. ビート検出
-                    val beat = beatDetector.analyze(fBuf)
+                    val beat = beatDetector.analyze(fBuf, frameStartTimeMs)
 
                     // 3. 音量 (RMS + ピーク)
                     var sumSq = 0f; var peak = 0f
@@ -168,6 +171,7 @@ class TunerOverlayService : Service() {
         isCapturing = false
         try { captureThread?.join(3000); audioRecord?.stop(); audioRecord?.release() } catch (_: Exception) {}
         audioRecord = null; captureThread = null
+        beatPhaseTracker.reset()
     }
 
     // ============================================================
@@ -215,9 +219,24 @@ class TunerOverlayService : Service() {
                         BeatDetector.Band.COMBINED -> "⬤ 複合"
                     }
                 } else ""
-                accuracyTextView?.text = "正確度: ${accPct}%  $bandText"
+                val beatNumStr = when(beat.beatNumber) {
+                    1 -> "【1】2  3  4"
+                    2 -> " 1 【2】 3  4"
+                    3 -> " 1  2 【3】 4"
+                    4 -> " 1  2  3 【4】"
+                    else -> " -  -  -  -"
+                }
+                accuracyTextView?.text = "正確度: ${accPct}%  $bandText  $beatNumStr"
                 accuracyTextView?.setTextColor(Color.parseColor(accColor))
                 rhythmGraphView?.updateData(beat)
+                
+                val phaseState = beatPhaseTracker.getState(System.currentTimeMillis())
+                rhythmGraphView?.updatePhase(
+                    phaseState.beatPhase,
+                    phaseState.barPhase,
+                    phaseState.beatNumber,
+                    phaseState.nextBeatMs
+                )
             }
             2 -> {
                 // 音量タブ
@@ -332,20 +351,25 @@ class TunerOverlayService : Service() {
     inner class RhythmGraphView(ctx: Context) : View(ctx) {
         private var beatResult: BeatDetector.BeatResult? = null
 
+        // 位相状態を保持するフィールド
+        private var beatPhase = 0f      // 0.0〜1.0（現在の拍内位置）
+        private var barPhase = 0f       // 0.0〜1.0（小節内位置）
+        private var beatNumber = 1      // 1〜4
+        private var nextBeatMs = 0L     // 次の拍まで何ms
+
         // ペイント
         private val bgColor = Color.parseColor("#1A1A1A")
         private val bpmBigP = Paint(Paint.ANTI_ALIAS_FLAG).apply { textSize = 44f; typeface = Typeface.create(Typeface.DEFAULT, Typeface.BOLD); textAlign = Paint.Align.CENTER }
         private val confBarBgP = Paint().apply { color = Color.parseColor("#333333") }
         private val confBarP = Paint().apply { color = Color.parseColor("#2196F3") }
-        private val confTextP = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.parseColor("#888888"); textSize = 16f; textAlign = Paint.Align.CENTER }
+        private val confTextP = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.parseColor("#888888"); textSize = 14f; textAlign = Paint.Align.CENTER }
         private val beatDotP = Paint(Paint.ANTI_ALIAS_FLAG)
         private val beatLineP = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.STROKE; strokeWidth = 2f }
-        private val gridLineP = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.parseColor("#334CAF50"); strokeWidth = 1.5f }
+        private val gridLineP = Paint(Paint.ANTI_ALIAS_FLAG).apply { strokeWidth = 1.5f }
         private val nowLineP = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.WHITE; strokeWidth = 2f }
         private val fluxBarP = Paint(Paint.ANTI_ALIAS_FLAG)
         private val fluxBgP = Paint().apply { color = Color.parseColor("#222222") }
         private val threshLineP = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.parseColor("#80FFFFFF"); strokeWidth = 1f; pathEffect = DashPathEffect(floatArrayOf(6f, 4f), 0f) }
-        private val labelP = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.parseColor("#888888"); textSize = 16f }
         private val bandLabelP = Paint(Paint.ANTI_ALIAS_FLAG).apply { textSize = 14f; textAlign = Paint.Align.CENTER }
 
         private val lowColor = Color.parseColor("#E91E63")   // ピンク（キック）
@@ -353,6 +377,14 @@ class TunerOverlayService : Service() {
         private val highColor = Color.parseColor("#00BCD4")  // シアン（ハイハット）
 
         fun updateData(b: BeatDetector.BeatResult) { beatResult = b; invalidate() }
+
+        fun updatePhase(phase: Float, bar: Float, num: Int, nextMs: Long) {
+            beatPhase = phase
+            barPhase = bar
+            beatNumber = num
+            nextBeatMs = nextMs
+            invalidate()
+        }
 
         override fun onDraw(c: Canvas) {
             c.drawColor(bgColor)
@@ -369,7 +401,6 @@ class TunerOverlayService : Service() {
                 val barW = w * 0.5f; val barH = 5f; val barX = (w - barW) / 2f; val barY = topH * 0.7f
                 c.drawRoundRect(barX, barY, barX + barW, barY + barH, 3f, 3f, confBarBgP)
                 c.drawRoundRect(barX, barY, barX + barW * b.confidence, barY + barH, 3f, 3f, confBarP)
-                confTextP.textSize = 14f
                 c.drawText("信頼度 ${(b.confidence * 100).roundToInt()}%", w / 2f, barY + 18f, confTextP)
             } else {
                 bpmBigP.color = Color.parseColor("#444444")
@@ -383,25 +414,17 @@ class TunerOverlayService : Service() {
             val singleBarW = barTotalW / barCount
 
             val maxFlux = maxOf(b.lowFlux, b.midFlux, b.highFlux, b.fluxThreshold, 0.001f) * 1.3f
-            val fluxes = listOf(
-                Triple(b.lowFlux, lowColor, "LOW"),
-                Triple(b.midFlux, midColor, "MID"),
-                Triple(b.highFlux, highColor, "HI")
-            )
+            val fluxes = listOf(Triple(b.lowFlux, lowColor, "LOW"), Triple(b.midFlux, midColor, "MID"), Triple(b.highFlux, highColor, "HI"))
             for ((idx, triple) in fluxes.withIndex()) {
                 val (flux, color, label) = triple
                 val bx = pad + idx * (singleBarW + gap)
                 val fillH = (flux / maxFlux * midH).coerceIn(0f, midH)
-                // 背景
                 c.drawRoundRect(bx, midTop, bx + singleBarW, midBot, 4f, 4f, fluxBgP)
-                // 値
                 fluxBarP.color = color; fluxBarP.alpha = 200
                 c.drawRoundRect(bx, midBot - fillH, bx + singleBarW, midBot, 4f, 4f, fluxBarP)
-                // ラベル
                 bandLabelP.color = color
                 c.drawText(label, bx + singleBarW / 2f, midTop - 3f, bandLabelP)
             }
-            // 閾値ライン
             val threshY = midBot - (b.fluxThreshold / maxFlux * midH).coerceIn(0f, midH)
             c.drawLine(pad, threshY, w - pad, threshY, threshLineP)
 
@@ -409,76 +432,78 @@ class TunerOverlayService : Service() {
             val tlTop = midBot + 8f; val tlBot = h - pad; val tlH = tlBot - tlTop
             if (tlH < 10f) return
 
+            // b) ビートクロック（円形インジケーター）
+            val clockR = (tlH / 2f - 4f).coerceAtMost(24f)
+            val clockCx = pad + clockR + 2f
+            val clockCy = tlTop + tlH / 2f
+            c.drawCircle(clockCx, clockCy, clockR, Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.parseColor("#2A2A2A"); style = Paint.Style.FILL })
+            val clockColor = when(beatNumber) {
+                1 -> Color.parseColor("#E91E63")   // 1拍目=ピンク
+                3 -> Color.parseColor("#FF9800")   // 3拍目=オレンジ
+                else -> Color.parseColor("#00BCD4") // 2,4拍目=シアン
+            }
+            val sweepAngle = beatPhase * 360f
+            c.drawArc(clockCx - clockR + 3f, clockCy - clockR + 3f, clockCx + clockR - 3f, clockCy + clockR - 3f, -90f, sweepAngle, false, Paint(Paint.ANTI_ALIAS_FLAG).apply { color = clockColor; style = Paint.Style.STROKE; strokeWidth = 5f; strokeCap = Paint.Cap.ROUND })
+            c.drawText("$beatNumber", clockCx, clockCy + clockR * 0.28f, Paint(Paint.ANTI_ALIAS_FLAG).apply { color = clockColor; textSize = clockR * 0.8f; textAlign = Paint.Align.CENTER; typeface = Typeface.create(Typeface.DEFAULT, Typeface.BOLD) })
+
+            // ビートタイムラインの開始X座標をクロックの右側にずらす
+            val tlStartX = clockCx + clockR + 8f
             val now = System.currentTimeMillis()
             val windowMs = 6000L
 
-            // 予測グリッド（BPMから等間隔の縦線）
+            // a) 予測グリッドを正確に計算
             if (b.bpm > 0 && b.predictedBeatIntervalMs > 0) {
                 val interval = b.predictedBeatIntervalMs
-                val gridStart = now - windowMs
-                // グリッドアンカーから逆算して最初のグリッド位置を求める
-                var t = now
-                while (t > gridStart) t -= interval
-                t += interval
-                while (t <= now) {
-                    val age = (now - t).toFloat() / windowMs
-                    val x = w - pad - (w - 2 * pad) * age
-                    if (x >= pad) {
-                        gridLineP.alpha = ((1f - age * 0.3f) * 100).toInt().coerceIn(30, 100)
+                val lastBeatAgoMs = (beatPhase * interval).toLong()
+                var gridTimeOffset = lastBeatAgoMs
+                while (gridTimeOffset < windowMs) {
+                    val age = gridTimeOffset.toFloat() / windowMs
+                    val x = w - pad - (w - tlStartX - pad) * age
+                    if (x >= tlStartX) {
+                        val gridBeatInBar = ((gridTimeOffset / interval).toInt()) % 4
+                        val isDownbeat = (beatNumber - 1 + gridBeatInBar) % 4 == 0
+                        gridLineP.color = if (isDownbeat) Color.parseColor("#80E91E63") else Color.parseColor("#334CAF50")
+                        gridLineP.alpha = ((1f - age * 0.4f) * 150).toInt().coerceIn(40, 150)
                         c.drawLine(x, tlTop, x, tlBot, gridLineP)
                     }
-                    t += interval
+                    gridTimeOffset += interval
                 }
             }
 
-            // ビートドット
+            // c) ビートドット
             val recentBeats = b.beats.filter { now - it.timeMs < windowMs }
             for (beat in recentBeats) {
                 val age = (now - beat.timeMs).toFloat() / windowMs
-                val x = w - pad - (w - 2 * pad) * age
-                if (x < pad) continue
-
+                val x = w - pad - (w - tlStartX - pad) * age
+                if (x < tlStartX) continue
                 val baseColor = when (beat.band) {
                     BeatDetector.Band.LOW -> lowColor
                     BeatDetector.Band.MID -> midColor
                     BeatDetector.Band.HIGH -> highColor
-                    BeatDetector.Band.COMBINED -> Color.WHITE
+                    else -> Color.WHITE
                 }
-
                 val alpha = ((1f - age * 0.6f) * 255).toInt().coerceIn(40, 255)
                 val radius = 5f + beat.strength * 12f
-
-                // 縦線（薄く）
                 beatLineP.color = baseColor; beatLineP.alpha = alpha / 3
                 c.drawLine(x, tlTop, x, tlBot, beatLineP)
-
-                // 正確度で縦位置を変える（正確=中央、不正確=上下にズレ）
                 val yCenter = tlTop + tlH / 2f
                 val yOffset = (1f - beat.accuracy) * tlH * 0.35f
                 val y = yCenter + if (beat.accuracy < 0.5f) yOffset else -yOffset * 0.2f
-
-                // グロー
                 beatDotP.color = baseColor; beatDotP.alpha = alpha / 3
                 c.drawCircle(x, y, radius * 1.8f, beatDotP)
-
-                // ドット
                 beatDotP.alpha = alpha
                 c.drawCircle(x, y, radius, beatDotP)
-
-                // 正確度色リング
-                val accColor = when {
-                    beat.accuracy >= 0.85f -> Color.parseColor("#4CAF50")
-                    beat.accuracy >= 0.6f -> Color.parseColor("#FFC107")
-                    else -> Color.parseColor("#FF5722")
-                }
-                val ringP = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-                    color = accColor; style = Paint.Style.STROKE; strokeWidth = 2f; this.alpha = alpha
-                }
-                c.drawCircle(x, y, radius + 3f, ringP)
+                val accColor = when { beat.accuracy >= 0.85f -> Color.parseColor("#4CAF50"); beat.accuracy >= 0.6f -> Color.parseColor("#FFC107"); else -> Color.parseColor("#FF5722") }
+                c.drawCircle(x, y, radius + 3f, Paint(Paint.ANTI_ALIAS_FLAG).apply { color = accColor; style = Paint.Style.STROKE; strokeWidth = 2f; this.alpha = alpha })
             }
 
             // Now マーカー
             c.drawLine(w - pad, tlTop, w - pad, tlBot, nowLineP)
+
+            // 4. 次のビートまでの時間
+            if (b.bpm > 0) {
+                c.drawText("next: ${nextBeatMs}ms", pad, tlBot - 2f, Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.parseColor("#555555"); textSize = 11f })
+            }
 
             // 帯域凡例（下部右寄せ）
             val legendY = tlBot - 2f
@@ -486,8 +511,8 @@ class TunerOverlayService : Service() {
             var lx = w - pad
             for ((label, color) in listOf("HI" to highColor, "MID" to midColor, "LOW" to lowColor)) {
                 legendP.color = color
-                val tw = legendP.measureText(label)
-                lx -= tw + 8f
+                val tw2 = legendP.measureText(label)
+                lx -= tw2 + 8f
                 c.drawCircle(lx - 6f, legendY - 4f, 3f, Paint().apply { this.color = color })
                 c.drawText(label, lx, legendY, legendP)
                 lx -= 12f
@@ -675,8 +700,24 @@ class TunerOverlayService : Service() {
         rhythmInfoContainer = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER; visibility = View.GONE
         }
-        accuracyTextView = TextView(this).apply { text = "正確度: --%"; textSize = 14f; setTextColor(Color.parseColor("#666666")); gravity = Gravity.CENTER }
+        accuracyTextView = TextView(this).apply { text = "正確度: --%"; textSize = 14f; setTextColor(Color.parseColor("#666666")); gravity = Gravity.CENTER; layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f) }
         rhythmInfoContainer!!.addView(accuracyTextView)
+
+        // タップテンポボタン
+        val tapBtn = TextView(this).apply {
+            text = "TAP"
+            textSize = 11f
+            setTextColor(Color.WHITE)
+            setPadding((10 * dp).toInt(), (4 * dp).toInt(), (10 * dp).toInt(), (4 * dp).toInt())
+            background = GradientDrawable().apply {
+                setColor(Color.parseColor("#333333"))
+                cornerRadius = 4 * dp
+            }
+            setOnClickListener {
+                beatPhaseTracker.tapTempo(System.currentTimeMillis())
+            }
+        }
+        rhythmInfoContainer!!.addView(tapBtn)
 
         // グラフコンテナ
         graphContainer = FrameLayout(this).apply {
