@@ -205,8 +205,17 @@ class TunerOverlayService : Service() {
             1 -> {
                 // リズムタブ
                 val accPct = (beat.averageAccuracy * 100).roundToInt()
-                val accColor = when { accPct >= 90 -> "#4CAF50"; accPct >= 70 -> "#FFC107"; else -> "#FF5722" }
-                accuracyTextView?.text = "正確度: ${accPct}%"
+                val accColor = when { accPct >= 85 -> "#4CAF50"; accPct >= 60 -> "#FFC107"; else -> "#FF5722" }
+                val bandText = if (beat.beats.isNotEmpty()) {
+                    val last = beat.beats.last()
+                    when (last.band) {
+                        BeatDetector.Band.LOW -> "⬤ キック"
+                        BeatDetector.Band.MID -> "⬤ スネア"
+                        BeatDetector.Band.HIGH -> "⬤ ハイハット"
+                        BeatDetector.Band.COMBINED -> "⬤ 複合"
+                    }
+                } else ""
+                accuracyTextView?.text = "正確度: ${accPct}%  $bandText"
                 accuracyTextView?.setTextColor(Color.parseColor(accColor))
                 rhythmGraphView?.updateData(beat)
             }
@@ -318,88 +327,171 @@ class TunerOverlayService : Service() {
     }
 
     // ============================================================
-    //  カスタムView: リズムグラフ
+    //  カスタムView: リズムグラフ（スペクトラルフラックス版）
     // ============================================================
     inner class RhythmGraphView(ctx: Context) : View(ctx) {
         private var beatResult: BeatDetector.BeatResult? = null
+
+        // ペイント
+        private val bgColor = Color.parseColor("#1A1A1A")
+        private val bpmBigP = Paint(Paint.ANTI_ALIAS_FLAG).apply { textSize = 44f; typeface = Typeface.create(Typeface.DEFAULT, Typeface.BOLD); textAlign = Paint.Align.CENTER }
+        private val confBarBgP = Paint().apply { color = Color.parseColor("#333333") }
+        private val confBarP = Paint().apply { color = Color.parseColor("#2196F3") }
+        private val confTextP = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.parseColor("#888888"); textSize = 16f; textAlign = Paint.Align.CENTER }
         private val beatDotP = Paint(Paint.ANTI_ALIAS_FLAG)
-        private val lineP = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.parseColor("#802196F3"); style = Paint.Style.STROKE; strokeWidth = 2f }
-        private val gridP = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.parseColor("#2A2A2A"); strokeWidth = 1f }
-        private val textP = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.parseColor("#999999"); textSize = 20f }
-        private val bpmBigP = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.parseColor("#2196F3"); textSize = 48f; typeface = Typeface.create(Typeface.DEFAULT, Typeface.BOLD); textAlign = Paint.Align.CENTER }
-        private val tickP = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.parseColor("#444444"); strokeWidth = 1f }
+        private val beatLineP = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.STROKE; strokeWidth = 2f }
+        private val gridLineP = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.parseColor("#334CAF50"); strokeWidth = 1.5f }
+        private val nowLineP = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.WHITE; strokeWidth = 2f }
+        private val fluxBarP = Paint(Paint.ANTI_ALIAS_FLAG)
+        private val fluxBgP = Paint().apply { color = Color.parseColor("#222222") }
+        private val threshLineP = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.parseColor("#80FFFFFF"); strokeWidth = 1f; pathEffect = DashPathEffect(floatArrayOf(6f, 4f), 0f) }
+        private val labelP = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.parseColor("#888888"); textSize = 16f }
+        private val bandLabelP = Paint(Paint.ANTI_ALIAS_FLAG).apply { textSize = 14f; textAlign = Paint.Align.CENTER }
+
+        private val lowColor = Color.parseColor("#E91E63")   // ピンク（キック）
+        private val midColor = Color.parseColor("#FF9800")   // オレンジ（スネア）
+        private val highColor = Color.parseColor("#00BCD4")  // シアン（ハイハット）
 
         fun updateData(b: BeatDetector.BeatResult) { beatResult = b; invalidate() }
 
         override fun onDraw(c: Canvas) {
-            c.drawColor(Color.parseColor("#1A1A1A"))
+            c.drawColor(bgColor)
             val b = beatResult ?: return
             val w = width.toFloat(); val h = height.toFloat()
-            val pad = 12f
+            val pad = 10f; val dp = resources.displayMetrics.density
 
-            // 上半分: BPM大表示 + 信頼度バー
-            val midY = h * 0.35f
+            // ====== 上段: BPM + 信頼度 (高さ 22%) ======
+            val topH = h * 0.22f
             if (b.bpm > 0) {
                 bpmBigP.color = if (b.confidence > 0.5f) Color.parseColor("#2196F3") else Color.parseColor("#666666")
-                c.drawText("%.0f".format(b.bpm), w / 2f, midY, bpmBigP)
+                c.drawText("%.0f BPM".format(b.bpm), w / 2f, topH * 0.55f, bpmBigP)
                 // 信頼度バー
-                val barW = w * 0.6f; val barH = 6f; val barX = (w - barW) / 2f; val barY = midY + 12f
-                val bgP = Paint().apply { color = Color.parseColor("#333333") }
-                c.drawRoundRect(barX, barY, barX + barW, barY + barH, 3f, 3f, bgP)
-                val fillP = Paint().apply { color = Color.parseColor("#2196F3") }
-                c.drawRoundRect(barX, barY, barX + barW * b.confidence, barY + barH, 3f, 3f, fillP)
-                val confP = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.parseColor("#888888"); textSize = 18f; textAlign = Paint.Align.CENTER }
-                c.drawText("信頼度 ${(b.confidence * 100).roundToInt()}%", w / 2f, barY + 22f, confP)
+                val barW = w * 0.5f; val barH = 5f; val barX = (w - barW) / 2f; val barY = topH * 0.7f
+                c.drawRoundRect(barX, barY, barX + barW, barY + barH, 3f, 3f, confBarBgP)
+                c.drawRoundRect(barX, barY, barX + barW * b.confidence, barY + barH, 3f, 3f, confBarP)
+                confTextP.textSize = 14f
+                c.drawText("信頼度 ${(b.confidence * 100).roundToInt()}%", w / 2f, barY + 18f, confTextP)
             } else {
                 bpmBigP.color = Color.parseColor("#444444")
-                c.drawText("---", w / 2f, midY, bpmBigP)
+                c.drawText("--- BPM", w / 2f, topH * 0.55f, bpmBigP)
             }
 
-            // 下半分: ビートタイムライン
-            val tlTop = h * 0.55f; val tlBot = h - pad; val tlH = tlBot - tlTop
-            if (b.beats.isEmpty()) return
+            // ====== 中段: スペクトラルフラックスバー (高さ 18%) ======
+            val midTop = topH + 4f; val midH = h * 0.18f; val midBot = midTop + midH
+            val barCount = 3; val gap = 6f * dp
+            val barTotalW = w - 2 * pad - gap * (barCount - 1)
+            val singleBarW = barTotalW / barCount
+
+            val maxFlux = maxOf(b.lowFlux, b.midFlux, b.highFlux, b.fluxThreshold, 0.001f) * 1.3f
+            val fluxes = listOf(
+                Triple(b.lowFlux, lowColor, "LOW"),
+                Triple(b.midFlux, midColor, "MID"),
+                Triple(b.highFlux, highColor, "HI")
+            )
+            for ((idx, triple) in fluxes.withIndex()) {
+                val (flux, color, label) = triple
+                val bx = pad + idx * (singleBarW + gap)
+                val fillH = (flux / maxFlux * midH).coerceIn(0f, midH)
+                // 背景
+                c.drawRoundRect(bx, midTop, bx + singleBarW, midBot, 4f, 4f, fluxBgP)
+                // 値
+                fluxBarP.color = color; fluxBarP.alpha = 200
+                c.drawRoundRect(bx, midBot - fillH, bx + singleBarW, midBot, 4f, 4f, fluxBarP)
+                // ラベル
+                bandLabelP.color = color
+                c.drawText(label, bx + singleBarW / 2f, midTop - 3f, bandLabelP)
+            }
+            // 閾値ライン
+            val threshY = midBot - (b.fluxThreshold / maxFlux * midH).coerceIn(0f, midH)
+            c.drawLine(pad, threshY, w - pad, threshY, threshLineP)
+
+            // ====== 下段: ビートタイムライン (残り) ======
+            val tlTop = midBot + 8f; val tlBot = h - pad; val tlH = tlBot - tlTop
+            if (tlH < 10f) return
 
             val now = System.currentTimeMillis()
-            val windowMs = 8000L  // 直近8秒を表示
-            val recentBeats = b.beats.filter { now - it.timeMs < windowMs }
-            if (recentBeats.isEmpty()) return
+            val windowMs = 6000L
 
-            // グリッド線（BPMに基づく等間隔）
-            if (b.bpm > 0) {
-                val intervalMs = 60_000.0 / b.bpm
+            // 予測グリッド（BPMから等間隔の縦線）
+            if (b.bpm > 0 && b.predictedBeatIntervalMs > 0) {
+                val interval = b.predictedBeatIntervalMs
                 val gridStart = now - windowMs
-                var t = gridStart - (gridStart % intervalMs.toLong())
-                while (t < now) {
-                    val x = pad + (w - 2 * pad) * ((t - gridStart).toFloat() / windowMs)
-                    if (x >= pad) c.drawLine(x, tlTop, x, tlBot, tickP)
-                    t += intervalMs.toLong()
+                // グリッドアンカーから逆算して最初のグリッド位置を求める
+                var t = now
+                while (t > gridStart) t -= interval
+                t += interval
+                while (t <= now) {
+                    val age = (now - t).toFloat() / windowMs
+                    val x = w - pad - (w - 2 * pad) * age
+                    if (x >= pad) {
+                        gridLineP.alpha = ((1f - age * 0.3f) * 100).toInt().coerceIn(30, 100)
+                        c.drawLine(x, tlTop, x, tlBot, gridLineP)
+                    }
+                    t += interval
                 }
             }
 
             // ビートドット
+            val recentBeats = b.beats.filter { now - it.timeMs < windowMs }
             for (beat in recentBeats) {
                 val age = (now - beat.timeMs).toFloat() / windowMs
-                val x = pad + (w - 2 * pad) * (1f - age)
-                val radius = 4f + beat.strength * 10f
+                val x = w - pad - (w - 2 * pad) * age
+                if (x < pad) continue
 
-                val color = when {
-                    beat.accuracy >= 0.9f -> Color.parseColor("#4CAF50")
-                    beat.accuracy >= 0.7f -> Color.parseColor("#FFC107")
+                val baseColor = when (beat.band) {
+                    BeatDetector.Band.LOW -> lowColor
+                    BeatDetector.Band.MID -> midColor
+                    BeatDetector.Band.HIGH -> highColor
+                    BeatDetector.Band.COMBINED -> Color.WHITE
+                }
+
+                val alpha = ((1f - age * 0.6f) * 255).toInt().coerceIn(40, 255)
+                val radius = 5f + beat.strength * 12f
+
+                // 縦線（薄く）
+                beatLineP.color = baseColor; beatLineP.alpha = alpha / 3
+                c.drawLine(x, tlTop, x, tlBot, beatLineP)
+
+                // 正確度で縦位置を変える（正確=中央、不正確=上下にズレ）
+                val yCenter = tlTop + tlH / 2f
+                val yOffset = (1f - beat.accuracy) * tlH * 0.35f
+                val y = yCenter + if (beat.accuracy < 0.5f) yOffset else -yOffset * 0.2f
+
+                // グロー
+                beatDotP.color = baseColor; beatDotP.alpha = alpha / 3
+                c.drawCircle(x, y, radius * 1.8f, beatDotP)
+
+                // ドット
+                beatDotP.alpha = alpha
+                c.drawCircle(x, y, radius, beatDotP)
+
+                // 正確度色リング
+                val accColor = when {
+                    beat.accuracy >= 0.85f -> Color.parseColor("#4CAF50")
+                    beat.accuracy >= 0.6f -> Color.parseColor("#FFC107")
                     else -> Color.parseColor("#FF5722")
                 }
-                beatDotP.color = color
-                beatDotP.alpha = ((1f - age * 0.5f) * 255).toInt().coerceIn(50, 255)
-
-                // 縦線
-                lineP.color = color; lineP.alpha = beatDotP.alpha / 2
-                c.drawLine(x, tlTop, x, tlBot, lineP)
-                // ドット（中央）
-                c.drawCircle(x, tlTop + tlH / 2f, radius, beatDotP)
+                val ringP = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+                    color = accColor; style = Paint.Style.STROKE; strokeWidth = 2f; this.alpha = alpha
+                }
+                c.drawCircle(x, y, radius + 3f, ringP)
             }
 
-            // 「now」マーカー
-            val nowP = Paint().apply { color = Color.parseColor("#FFFFFF"); strokeWidth = 2f }
-            c.drawLine(w - pad, tlTop, w - pad, tlBot, nowP)
+            // Now マーカー
+            c.drawLine(w - pad, tlTop, w - pad, tlBot, nowLineP)
+
+            // 帯域凡例（下部右寄せ）
+            val legendY = tlBot - 2f
+            val legendP = Paint(Paint.ANTI_ALIAS_FLAG).apply { textSize = 12f }
+            var lx = w - pad
+            for ((label, color) in listOf("HI" to highColor, "MID" to midColor, "LOW" to lowColor)) {
+                legendP.color = color
+                val tw = legendP.measureText(label)
+                lx -= tw + 8f
+                c.drawCircle(lx - 6f, legendY - 4f, 3f, Paint().apply { this.color = color })
+                c.drawText(label, lx, legendY, legendP)
+                lx -= 12f
+            }
         }
     }
 
