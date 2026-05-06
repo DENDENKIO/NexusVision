@@ -247,7 +247,8 @@ class TunerOverlayService : Service() {
     // ============================================================
     class FeatureExtractor(private val sampleRate: Int, private val fftSize: Int) {
         private val real = FloatArray(fftSize); private val imag = FloatArray(fftSize)
-        private var prevMags = FloatArray(fftSize / 2); private var lraMin = 0f; private var lraMax = -100f
+        private var prevMags = FloatArray(fftSize / 2)
+        private var lraRmsHistory = ArrayDeque<Float>(150)
         
         fun extract(fBuf: FloatArray, pitch: PitchDetector.PitchResult?, beat: BeatDetector.BeatResult): AnalysisResult {
             // L2: Loudness
@@ -255,7 +256,19 @@ class TunerOverlayService : Service() {
             for (v in fBuf) { val a = abs(v); if(a > maxA) maxA = a; sumS += v*v }
             val rms = sqrt(sumS / fBuf.size)
             val peakDb = 20 * log10(maxA.coerceAtLeast(1e-6f)); val rmsDb = 20 * log10(rms.coerceAtLeast(1e-6f))
-            if(rmsDb > -60) { lraMin = min(lraMin, rmsDb); lraMax = max(lraMax, rmsDb) }
+            
+            if (rmsDb > -70f) lraRmsHistory.addLast(rmsDb)
+            if (lraRmsHistory.size > 150) lraRmsHistory.removeFirst()
+            
+            val lra: Float
+            if (lraRmsHistory.size >= 10) {
+                val sorted = lraRmsHistory.sorted()
+                val low = sorted[(sorted.size * 0.10f).toInt().coerceIn(0, sorted.size - 1)]
+                val high = sorted[(sorted.size * 0.95f).toInt().coerceIn(0, sorted.size - 1)]
+                lra = (high - low).coerceAtLeast(0f)
+            } else {
+                lra = 0f
+            }
 
             // L3: Time Domain
             var zc = 0; for (i in 1 until fBuf.size) if(fBuf[i-1]*fBuf[i] < 0) zc++
@@ -276,9 +289,32 @@ class TunerOverlayService : Service() {
             val flatness = if(totalM > 0) exp(logSum.toFloat()/half) / (totalM/half) else 0f
             var flux = 0f; for(i in 0 until half) flux += (mags[i] - prevMags[i]).pow(2); prevMags = mags.clone()
 
-            // L5: Perceptual (Mel / MFCC)
-            val mel = FloatArray(26); for(i in 0 until 26) mel[i] = totalM * (i+1)/300f // 簡易フィルタ代用
-            val mfcc = FloatArray(12); for(i in 0 until 12) mfcc[i] = abs((ln(totalM.coerceAtLeast(1e-6f)) * cos(PI*i/12f)).toFloat())
+            // L5: Perceptual (Mel filterbank → 疑似DCT)
+            val numMel = 26
+            val mel = FloatArray(numMel)
+            val nyq = sampleRate / 2f
+            for (m in 0 until numMel) {
+                val fLow  = melToHz(hzToMel(80f)  + m     * (hzToMel(nyq) - hzToMel(80f)) / (numMel + 1))
+                val fMid  = melToHz(hzToMel(80f)  + (m+1) * (hzToMel(nyq) - hzToMel(80f)) / (numMel + 1))
+                val fHigh = melToHz(hzToMel(80f)  + (m+2) * (hzToMel(nyq) - hzToMel(80f)) / (numMel + 1))
+                var energy = 0f
+                for (k in 0 until half) {
+                    val freq = k * sampleRate.toFloat() / fftSize
+                    energy += when {
+                        freq in fLow..fMid  -> mags[k] * (freq - fLow) / (fMid - fLow)
+                        freq in fMid..fHigh -> mags[k] * (fHigh - freq) / (fHigh - fMid)
+                        else -> 0f
+                    }
+                }
+                mel[m] = ln(energy.coerceAtLeast(1e-9f))
+            }
+            val mfcc = FloatArray(12)
+            for (i in 0 until 12) {
+                var sum = 0f
+                for (m in 0 until numMel)
+                    sum += mel[m] * cos(PI * i * (m + 0.5) / numMel).toFloat()
+                mfcc[i] = abs(sum / numMel)
+            }
             val f1 = centroid * 0.45f; val f2 = centroid * 1.2f
             val vowel = when { zcr > 0.28f -> "Noise"; centroid > 2200 -> "i"; centroid > 1500 -> "e"; centroid > 800 -> "a"; else -> "o/u" }
 
@@ -298,11 +334,14 @@ class TunerOverlayService : Service() {
                 (flux / 500f).coerceIn(0f, 1f),
                 maxA.coerceIn(0f, 1f),
                 if (pitch != null) 1f else 0.1f,
-                ((lraMax - lraMin) / 20f).coerceIn(0f, 1f)
+                (lra / 20f).coerceIn(0f, 1f)
             )
 
-            return AnalysisResult(sampleRate, fBuf.size, "MIC/System", peakDb, rmsDb, if(rms>0) maxA/rms else 0f, lraMax-lraMin, zcr, maxA, centroid, 0f, rolloff, flatness, flux, mags, mel, mfcc, f1, f2, vowel, chroma, "C (est)", event, 0.9f, speaker, semanticFeatures)
+            return AnalysisResult(sampleRate, fBuf.size, "MIC/System", peakDb, rmsDb, if(rms>0) maxA/rms else 0f, lra, zcr, maxA, centroid, 0f, rolloff, flatness, flux, mags, mel, mfcc, f1, f2, vowel, chroma, "C (est)", event, 0.9f, speaker, semanticFeatures)
         }
+
+        private fun hzToMel(hz: Float) = 2595f * log10(1f + hz / 700f)
+        private fun melToHz(mel: Float) = 700f * (10f.pow(mel / 2595f) - 1f)
 
         private fun performFft(r: FloatArray, m: FloatArray) {
             val n = r.size; var j = 0
