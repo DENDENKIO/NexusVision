@@ -258,7 +258,7 @@ class TunerOverlayService : Service() {
             val rms = sqrt(sumS / fBuf.size)
             val peakDb = 20 * log10(maxA.coerceAtLeast(1e-6f)); val rmsDb = 20 * log10(rms.coerceAtLeast(1e-6f))
             
-            if (rmsDb > -70f) lraHistory.addLast(rmsDb)
+            lraHistory.addLast(rmsDb.coerceAtLeast(-70f))
             if (lraHistory.size > LRA_WINDOW) lraHistory.removeFirst()
             
             val lraValue: Float = if (lraHistory.size >= 5) {
