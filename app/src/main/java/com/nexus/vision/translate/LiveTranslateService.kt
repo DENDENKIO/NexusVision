@@ -36,8 +36,13 @@ class LiveTranslateService : Service() {
         const val EXTRA_RESULT_DATA = "result_data"
 
         private const val SAMPLE_RATE = 16000
-        private const val VAD_WINDOW = 512  // Silero VAD requires 512 samples per call
+        private const val VAD_WINDOW = 512
         private const val TRANSLATE_THROTTLE_MS = 1000L
+
+        // SenseVoice が付与するタグ（除去用）
+        private val SENSE_VOICE_TAG_REGEX = Regex(
+            "<\\|[^|]*\\|>|\\[\\w+\\]"
+        )
     }
 
     // sherpa-onnx (offline = SenseVoice)
@@ -67,10 +72,6 @@ class LiveTranslateService : Service() {
     private var isCurrentlyListening = false
     private var currentButtonBg: View? = null
 
-    // History
-    private val history = mutableListOf<Pair<String, String>>()
-    private var historyView: LinearLayout? = null
-
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -86,14 +87,13 @@ class LiveTranslateService : Service() {
                     intent.getParcelableExtra(EXTRA_RESULT_DATA)
                 }
 
-                // resultData が null なら何もせず終了（再起動ループ防止）
                 if (resultData == null) {
                     Log.e(TAG, "resultData is null — cannot start")
                     stopSelf()
                     return START_NOT_STICKY
                 }
 
-                // ① まず Foreground Service を開始（MediaProjection タイプ）
+                // ① まず Foreground Service を開始
                 startForegroundNotification()
 
                 // ② Foreground 状態になった後で MediaProjection を取得
@@ -122,7 +122,6 @@ class LiveTranslateService : Service() {
     // ============================================================
     private fun initSherpaOnnx(sourceLang: String) {
         try {
-            // --- Silero VAD ---
             val vadConfig = VadModelConfig(
                 sileroVadModelConfig = SileroVadModelConfig(
                     model = "silero_vad.onnx",
@@ -139,7 +138,6 @@ class LiveTranslateService : Service() {
             vad = Vad(assetManager = assets, config = vadConfig)
             Log.i(TAG, "Silero VAD initialized")
 
-            // --- SenseVoice (offline, multilingual) ---
             val senseVoiceDir = "sherpa-onnx-sense-voice-zh-en-ja-ko-yue-int8-2024-07-17"
             val senseVoiceLang = when (sourceLang.lowercase().take(2)) {
                 "ja" -> "ja"
@@ -171,6 +169,14 @@ class LiveTranslateService : Service() {
             Log.e(TAG, "sherpa-onnx init FAILED: ${e.message}", e)
             updateStatus("STTエンジン初期化失敗: ${e.message}")
         }
+    }
+
+    // ============================================================
+    //  SenseVoice テキストクリーニング
+    // ============================================================
+    private fun cleanSenseVoiceText(raw: String): String {
+        // <|en|><|NEUTRAL|><|Speech|><|woitn|> などのタグを除去
+        return SENSE_VOICE_TAG_REGEX.replace(raw, "").trim()
     }
 
     // ============================================================
@@ -224,32 +230,30 @@ class LiveTranslateService : Service() {
                     if (read > 0) {
                         val floatBuffer = FloatArray(read) { shortBuffer[it] / 32768.0f }
 
-                        // VAD に渡す
                         vad?.acceptWaveform(floatBuffer)
 
-                        // 音声区間が検出されたら認識
                         while (vad?.empty() == false) {
                             val segment = vad!!.front()
                             vad!!.pop()
                             Log.d(TAG, "VAD segment: ${segment.samples.size} samples (${segment.samples.size / SAMPLE_RATE.toFloat()}s)")
 
-                            // SenseVoice で認識
                             val stream = recognizer!!.createStream()
                             stream.acceptWaveform(segment.samples, SAMPLE_RATE)
                             recognizer!!.decode(stream)
                             val result = recognizer!!.getResult(stream)
                             stream.release()
 
-                            val text = result.text.trim()
+                            // ★ タグ除去してクリーンなテキストを取得
+                            val text = cleanSenseVoiceText(result.text)
                             if (text.isNotEmpty()) {
-                                Log.i(TAG, "STT FINAL: \"$text\" (lang=${result.lang})")
+                                Log.i(TAG, "STT RAW : \"${result.text}\"")
+                                Log.i(TAG, "STT CLEAN: \"$text\" (lang=${result.lang})")
                                 Handler(Looper.getMainLooper()).post {
                                     onSpeechResult(text, true)
                                 }
                             }
                         }
 
-                        // 話し中は部分表示
                         if (vad?.isSpeechDetected() == true) {
                             Handler(Looper.getMainLooper()).post {
                                 statusTextView?.text = "音声検出中..."
@@ -297,13 +301,15 @@ class LiveTranslateService : Service() {
 
         translator?.translate(text)
             ?.addOnSuccessListener { translated ->
+                // ★ 翻訳結果が原文とほぼ同じなら表示しない（英→英防止）
+                if (translated.equals(text, ignoreCase = true) ||
+                    translated.trim().lowercase() == text.trim().lowercase()) {
+                    Log.w(TAG, "Translation same as source, skipping: \"$text\"")
+                    translatedTextView?.text = ""
+                    return@addOnSuccessListener
+                }
                 translatedTextView?.text = translated
                 Log.i(TAG, "translate: \"$text\" → \"$translated\"")
-                if (text.length > 1) {
-                    history.add(Pair(text, translated))
-                    if (history.size > 5) history.removeAt(0)
-                    updateHistory()
-                }
             }
             ?.addOnFailureListener { e ->
                 Log.e(TAG, "Translation failed: ${e.message}")
@@ -420,7 +426,7 @@ class LiveTranslateService : Service() {
     }
 
     // ============================================================
-    //  字幕オーバーレイ
+    //  字幕オーバーレイ（★履歴削除済み・コンパクト）
     // ============================================================
     private fun createSubtitleOverlay() {
         if (!Settings.canDrawOverlays(this)) return
@@ -429,17 +435,22 @@ class LiveTranslateService : Service() {
         val container = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setBackgroundColor(Color.parseColor("#CC000000"))
-            setPadding(24, 16, 24, 16)
+            setPadding(24, 12, 24, 12)
         }
-        statusTextView = TextView(this).apply { setTextColor(Color.parseColor("#80FFFFFF")); textSize = 11f; text = "初期化中..." }
-        originalTextView = TextView(this).apply { setTextColor(Color.parseColor("#B0B0B0")); textSize = 13f }
-        translatedTextView = TextView(this).apply { setTextColor(Color.WHITE); textSize = 16f; setTypeface(null, Typeface.BOLD) }
-        historyView = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        statusTextView = TextView(this).apply {
+            setTextColor(Color.parseColor("#80FFFFFF")); textSize = 11f; text = "初期化中..."
+        }
+        originalTextView = TextView(this).apply {
+            setTextColor(Color.parseColor("#B0B0B0")); textSize = 13f
+        }
+        translatedTextView = TextView(this).apply {
+            setTextColor(Color.WHITE); textSize = 16f; setTypeface(null, Typeface.BOLD)
+        }
 
         container.addView(statusTextView)
         container.addView(originalTextView)
         container.addView(translatedTextView)
-        container.addView(historyView)
+        // ★ historyView は追加しない
 
         val params = WindowManager.LayoutParams(
             WindowManager.LayoutParams.MATCH_PARENT,
@@ -454,14 +465,6 @@ class LiveTranslateService : Service() {
 
     private fun updateStatus(text: String) {
         Handler(Looper.getMainLooper()).post { statusTextView?.text = text }
-    }
-    private fun updateHistory() {
-        historyView?.removeAllViews()
-        history.takeLast(3).forEach { (o, t) ->
-            historyView?.addView(TextView(this).apply {
-                setTextColor(Color.parseColor("#60FFFFFF")); textSize = 11f; text = "$o → $t"
-            })
-        }
     }
 
     // ============================================================
