@@ -183,6 +183,24 @@
             android:foregroundServiceType="mediaProjection"
             android:exported="false" />
 
+        <!-- 小売業務モジュール -->
+        <activity android:name=".retail.ui.RetailMainActivity"
+            android:exported="true" />
+        <activity android:name=".retail.ui.DeliveryOcrActivity" />
+        <activity android:name=".retail.ui.DeliveryListActivity" />
+        <activity android:name=".retail.ui.ProductListActivity" />
+
+        <!-- カメラ撮影用 FileProvider -->
+        <provider
+            android:name="androidx.core.content.FileProvider"
+            android:authorities="${applicationId}.provider"
+            android:exported="false"
+            android:grantUriPermissions="true">
+            <meta-data
+                android:name="android.app.FILE_PROVIDER_PATHS"
+                android:resource="@xml/file_paths" />
+        </provider>
+
     </application>
 
 </manifest>
