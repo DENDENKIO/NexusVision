@@ -3,6 +3,7 @@ plugins {
     id("org.jetbrains.kotlin.android")
     id("org.jetbrains.kotlin.plugin.compose")
     id("io.objectbox")
+    kotlin("kapt")
 }
 
 android {
@@ -93,6 +94,8 @@ dependencies {
     // Core
     implementation("androidx.core:core-ktx:1.16.0")
     implementation("androidx.lifecycle:lifecycle-runtime-ktx:2.9.0")
+    implementation("androidx.appcompat:appcompat:1.7.0")
+    implementation("androidx.recyclerview:recyclerview:1.3.2")
 
     // CameraX
     val cameraVer = "1.4.2"
@@ -127,4 +130,10 @@ dependencies {
 
     // WorkManager
     implementation("androidx.work:work-runtime-ktx:2.10.1")
+
+    // Room ORM
+    val roomVer = "2.7.0-alpha13"
+    implementation("androidx.room:room-runtime:$roomVer")
+    implementation("androidx.room:room-ktx:$roomVer")
+    kapt("androidx.room:room-compiler:$roomVer")
 }
