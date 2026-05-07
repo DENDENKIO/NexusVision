@@ -44,6 +44,7 @@ import com.nexus.vision.ui.components.CropSelector
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Tune
 import androidx.compose.material.icons.filled.Translate
+import androidx.compose.material.icons.filled.ShoppingCart
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -54,6 +55,7 @@ fun MainScreen(
     onPickMultipleImages: () -> Unit = {},
     onNavigateToTuner: () -> Unit = {},
     onNavigateToTranslate: () -> Unit = {},
+    onNavigateToRetail: () -> Unit = {},
     onImageSelected: ((android.net.Uri) -> Unit) -> Unit = {},
     onMultipleImagesSelected: ((List<android.net.Uri>) -> Unit) -> Unit = {}
 ) {
@@ -97,6 +99,13 @@ fun MainScreen(
                     }
                 },
                 actions = {
+                    androidx.compose.material3.IconButton(onClick = onNavigateToRetail) {
+                        androidx.compose.material3.Icon(
+                            imageVector = Icons.Default.ShoppingCart,
+                            contentDescription = "業務ツール",
+                            tint = MaterialTheme.colorScheme.onSurface
+                        )
+                    }
                     androidx.compose.material3.IconButton(onClick = onNavigateToTuner) {
                         androidx.compose.material3.Icon(
                             imageVector = Icons.Default.Tune,

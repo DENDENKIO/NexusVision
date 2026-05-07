@@ -27,6 +27,7 @@ import androidx.navigation.compose.composable
 import androidx.navigation.compose.rememberNavController
 import com.nexus.vision.audio.TunerScreen
 import com.nexus.vision.translate.TranslateScreen
+import com.nexus.vision.retail.ui.RetailMainActivity
 
 class MainActivity : ComponentActivity() {
 
@@ -102,6 +103,9 @@ class MainActivity : ComponentActivity() {
                             onPickMultipleImages = { launchMultipleImagePicker() },
                             onNavigateToTuner = { navController.navigate("tuner") },
                             onNavigateToTranslate = { navController.navigate("translate") },
+                            onNavigateToRetail = {
+                                startActivity(Intent(this@MainActivity, RetailMainActivity::class.java))
+                            },
                             onImageSelected = { callback ->
                                 onImageSelected = callback
                             },
