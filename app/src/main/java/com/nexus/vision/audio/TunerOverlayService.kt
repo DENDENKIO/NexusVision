@@ -25,6 +25,7 @@ import kotlin.math.*
  */
 class TunerOverlayService : Service() {
 
+
     companion object {
         private const val TAG = "TunerL7"
         private const val NOTIFICATION_ID = 3001
@@ -147,6 +148,7 @@ class TunerOverlayService : Service() {
             headerNoteTv?.text = "${pitch.noteName}${pitch.octave}"
             headerNoteTv?.setTextColor(Color.parseColor(if(abs(pitch.centsDiff) < 5f) "#4CAF50" else if(abs(pitch.centsDiff) < 15f) "#FFC107" else "#FF5722"))
         } else { headerNoteTv?.text = "--"; headerNoteTv?.setTextColor(Color.parseColor("#666666")) }
+        
         headerBpmTv?.text = if (beat.bpm > 0) "%.0f BPM".format(beat.bpm) else "-- BPM"
         headerBpmTv?.setTextColor(if (beat.confidence > 0.5f) Color.parseColor("#2196F3") else Color.parseColor("#666666"))
 
@@ -156,7 +158,7 @@ class TunerOverlayService : Service() {
             2 -> (levelPanels[2] as? L3PanelView)?.update(f)
             3 -> (levelPanels[3] as? L4PanelView)?.update(f)
             4 -> (levelPanels[4] as? L5PanelView)?.update(f, pitch)
-            5 -> (levelPanels[5] as? L6PanelView)?.update(f, beat)
+            5 -> (levelPanels[5] as? SoundMap2DView)?.update(f, pitch)
             6 -> (levelPanels[6] as? L7PanelView)?.update(f)
         }
     }
@@ -191,7 +193,7 @@ class TunerOverlayService : Service() {
         }
         container.addView(tabRow)
         val panelFrame = FrameLayout(this).apply { layoutParams = LinearLayout.LayoutParams(-1, (160 * dp).toInt()) }
-        levelPanels[0] = L1PanelView(this); levelPanels[1] = L2PanelView(this); levelPanels[2] = L3PanelView(this); levelPanels[3] = L4PanelView(this); levelPanels[4] = L5PanelView(this); levelPanels[5] = L6PanelView(this); levelPanels[6] = L7PanelView(this)
+        levelPanels[0] = L1PanelView(this); levelPanels[1] = L2PanelView(this); levelPanels[2] = L3PanelView(this); levelPanels[3] = L4PanelView(this); levelPanels[4] = L5PanelView(this); levelPanels[5] = SoundMap2DView(this); levelPanels[6] = L7PanelView(this)
         levelPanels.forEach { it?.let { p -> p.visibility = View.GONE; panelFrame.addView(p) } }
         container.addView(panelFrame)
         val params = WindowManager.LayoutParams((280 * dp).toInt(), WindowManager.LayoutParams.WRAP_CONTENT, WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY, WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE, PixelFormat.TRANSLUCENT).apply { gravity = Gravity.TOP or Gravity.START; x = (40 * dp).toInt(); y = (80 * dp).toInt() }
@@ -235,11 +237,11 @@ class TunerOverlayService : Service() {
         val sampleRate: Int, val bufferSize: Int, val audioSource: String,
         val peakDbfs: Float, val rmsDbfs: Float, val crestFactor: Float, val lra: Float,
         val zcr: Float, val envelope: Float,
-        val centroid: Float, val spread: Float, val rolloff: Float, val flatness: Float, val flux: Float, val mags: FloatArray,
+        val rms: Float, val spectralCentroid: Float,
+        val spread: Float, val rolloff: Float, val flatness: Float, val flux: Float, val mags: FloatArray,
         val melBands: FloatArray, val mfcc: FloatArray, val f1: Float, val f2: Float, val vowel: String,
-        val chroma: FloatArray, val chord: String,
-        val event: String, val eventConf: Float, val speaker: String,
-        val semanticFeatures: FloatArray
+        val chroma: FloatArray, val chord: String, val eventConf: Float, val speaker: String,
+        val event: String, val semanticFeatures: FloatArray
     )
 
     // ============================================================
@@ -335,7 +337,7 @@ class TunerOverlayService : Service() {
                 (lraValue / 20f).coerceIn(0f, 1f)
             )
 
-            return AnalysisResult(sampleRate, fBuf.size, "MIC/System", peakDb, rmsDb, if(rms>0) maxA/rms else 0f, lraValue, zcr, maxA, centroid, 0f, rolloff, flatness, flux, mags, mel, mfcc, f1, f2, vowel, chroma, "C (est)", event, 0.9f, speaker, semanticFeatures)
+            return AnalysisResult(sampleRate, fBuf.size, "MIC/System", peakDb, rmsDb, if(rms>0) maxA/rms else 0f, lraValue, zcr, maxA, rms, centroid, 0f, rolloff, flatness, flux, mags, mel, mfcc, f1, f2, vowel, chroma, "C (est)", 0.9f, speaker, event, semanticFeatures)
         }
 
         private fun hzToMel(hz: Float) = 2595f * log10(1f + hz / 700f)
@@ -397,19 +399,13 @@ class TunerOverlayService : Service() {
     inner class L4PanelView(ctx: Context) : LinearLayout(ctx) {
         private val bars = BarChart(ctx, 32); private val info = TextView(ctx).apply { setTextColor(Color.WHITE); textSize = 10f }
         init { orientation = VERTICAL; setPadding(10, 10, 10, 10); addView(bars, LayoutParams(-1, 0, 1f)); addView(info) }
-        fun update(f: AnalysisResult) { bars.setValues(f.mags); info.text = "Centroid: %.0f Hz | Rolloff: %.0f Hz\nFlatness: %.3f | Flux: %.2f".format(f.centroid, f.rolloff, f.flatness, f.flux) }
+        fun update(f: AnalysisResult) { bars.setValues(f.mags); info.text = "Centroid: %.0f Hz | Rolloff: %.0f Hz\nFlatness: %.3f | Flux: %.2f".format(f.spectralCentroid, f.rolloff, f.flatness, f.flux) }
     }
 
     inner class L5PanelView(ctx: Context) : LinearLayout(ctx) {
         private val mfcc = BarChart(ctx, 12, Color.YELLOW); private val info = TextView(ctx).apply { setTextColor(Color.WHITE); textSize = 12f }
         init { orientation = VERTICAL; setPadding(10, 10, 10, 10); addView(mfcc, LayoutParams(-1, 0, 1f)); addView(info) }
         fun update(f: AnalysisResult, p: PitchDetector.PitchResult?) { mfcc.setValues(f.mfcc); info.text = "F0: ${p?.frequency?.toInt() ?: "--"} Hz | Vowel: ${f.vowel}\nF1: ${f.f1.toInt()} Hz | F2: ${f.f2.toInt()} Hz" }
-    }
-
-    inner class L6PanelView(ctx: Context) : LinearLayout(ctx) {
-        private val chroma = BarChart(ctx, 12, Color.MAGENTA); private val info = TextView(ctx).apply { setTextColor(Color.WHITE); textSize = 14f; setTypeface(null, Typeface.BOLD); gravity = Gravity.CENTER }
-        init { orientation = VERTICAL; setPadding(10, 10, 10, 10); addView(chroma, LayoutParams(-1, 0, 1f)); addView(info) }
-        fun update(f: AnalysisResult, b: BeatDetector.BeatResult) { chroma.setValues(f.chroma); info.text = "CHORD: ${f.chord} | BPM: %.1f".format(b.bpm) }
     }
 
     inner class L7PanelView(ctx: Context) : LinearLayout(ctx) {
@@ -423,7 +419,7 @@ class TunerOverlayService : Service() {
         }
         fun update(f: AnalysisResult) {
             radar.setValues(f.semanticFeatures)
-            info.text = "Event: ${f.event}\nConf: ${(f.eventConf*100).toInt()}%\nSpeaker: ${f.speaker}\n\n[LOG]\n- ${f.event} detected"
+            info.text = "Event: ${f.event}\nSpeaker: ${f.speaker}\n\n[LOG]\n- ${f.event} detected"
         }
     }
 
