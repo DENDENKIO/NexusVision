@@ -111,6 +111,44 @@ object DeliveryOcrParser {
         }
     }
 
+    /**
+     * TableReconstructor と連携して、座標情報に基づいたパースを実行
+     *
+     * Phase 9: 表復元連携
+     */
+    fun parseWithTable(
+        ocrResult: com.nexus.vision.ocr.OcrResult,
+        project: String = "通常"
+    ): List<ParseResult> {
+        val table = com.nexus.vision.ocr.TableReconstructor.reconstruct(ocrResult)
+        if (!table.isSuccess) {
+            // テーブル復元に失敗した場合は、従来の全テキストパースにフォールバック
+            return parse(ocrResult.fullText, project)
+        }
+
+        val results = mutableListOf<ParseResult>()
+        val fallbackYear = java.util.Calendar.getInstance()
+            .get(java.util.Calendar.YEAR).toString()
+
+        for (row in table.rows) {
+            // 行を結合して従来の parseLine に渡す
+            // (TableReconstructor がセルに分割済みなので、本来はセル単位で処理すべきだが
+            // 既存の parseLine が優秀なので一旦これを活用)
+            val lineText = row.joinToString("  ")
+            val res = parseLine(lineText, project, fallbackYear)
+            if (res != null) {
+                results.add(res)
+            }
+        }
+
+        // もし1件もパースできなかった場合、全テキストパースを試みる
+        if (results.isEmpty()) {
+            return parse(ocrResult.fullText, project)
+        }
+
+        return results
+    }
+
     /** パース結果 */
     sealed class ParseResult {
         data class Success(val record: DeliveryRecord) : ParseResult()

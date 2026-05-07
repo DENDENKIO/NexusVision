@@ -193,11 +193,11 @@
         <!-- カメラ撮影用 FileProvider -->
         <provider
             android:name="androidx.core.content.FileProvider"
-            android:authorities="${applicationId}.provider"
+            android:authorities="${applicationId}.retail.provider"
             android:exported="false"
             android:grantUriPermissions="true">
             <meta-data
-                android:name="android.app.FILE_PROVIDER_PATHS"
+                android:name="android.support.FILE_PROVIDER_PATHS"
                 android:resource="@xml/file_paths" />
         </provider>
 

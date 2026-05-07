@@ -29,7 +29,10 @@ import com.google.mlkit.vision.text.japanese.JapaneseTextRecognizerOptions
 import com.nexus.vision.retail.db.*
 import com.nexus.vision.retail.ocr.DeliveryOcrParser
 import com.nexus.vision.retail.repository.RetailRepository
+import com.nexus.vision.ocr.MlKitOcrEngine
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import java.io.File
 
 /**
@@ -192,37 +195,41 @@ class DeliveryOcrActivity : AppCompatActivity() {
         setStatus("🔍 OCR解析中...")
         saveBtn.visibility  = View.GONE
         retakeBtn.visibility = View.VISIBLE
+        previewImg.setImageURI(uri)
 
-        // プレビュー表示
-        try {
-            val bmp = InputImage.fromFilePath(this, uri).bitmapInternal
-            previewImg.setImageBitmap(bmp)
-        } catch (_: Exception) {
-            previewImg.setImageURI(uri)
-        }
+        lifecycleScope.launch(Dispatchers.IO) {
+            try {
+                // ① Uri → Bitmap 変換
+                val bitmap = if (android.os.Build.VERSION.SDK_INT >= 28) {
+                    val src = android.graphics.ImageDecoder.createSource(contentResolver, uri)
+                    android.graphics.ImageDecoder.decodeBitmap(src) { decoder, _, _ ->
+                        decoder.allocator = android.graphics.ImageDecoder.ALLOCATOR_SOFTWARE
+                    }
+                } else {
+                    @Suppress("DEPRECATION")
+                    android.provider.MediaStore.Images.Media.getBitmap(contentResolver, uri)
+                }
 
-        val image = try {
-            InputImage.fromFilePath(this, uri)
-        } catch (e: Exception) {
-            setStatus("❌ 画像読み込み失敗: ${e.message}"); return
-        }
+                // ② MlKitOcrEngine.recognize(bitmap) → OcrResult（座標付き）
+                val engine    = MlKitOcrEngine()
+                val ocrResult = engine.recognize(bitmap)
+                engine.close()
 
-        // ML Kit OCR (日本語対応)
-        val recognizer = TextRecognition.getClient(JapaneseTextRecognizerOptions.Builder().build())
-        recognizer.process(image)
-            .addOnSuccessListener { visionText ->
-                val rawText = visionText.text
-                processOcrResult(rawText)
+                // ③ DeliveryOcrParser.parseWithTable（TableReconstructor連携）
+                val project = projectEt.text.toString().ifBlank { "通常" }
+                val results = DeliveryOcrParser.parseWithTable(ocrResult, project)
+
+                withContext(Dispatchers.Main) { processOcrResult(results) }
+
+            } catch (e: Exception) {
+                withContext(Dispatchers.Main) {
+                    setStatus("❌ OCR失敗: ${e.message}")
+                }
             }
-            .addOnFailureListener { e ->
-                setStatus("❌ OCR失敗: ${e.message}")
-            }
+        }
     }
 
-    private fun processOcrResult(rawText: String) {
-        val project = projectEt.text.toString().ifBlank { "通常" }
-        val results = DeliveryOcrParser.parse(rawText, project)
-
+    private fun processOcrResult(results: List<DeliveryOcrParser.ParseResult>) {
         val successes = results.filterIsInstance<DeliveryOcrParser.ParseResult.Success>()
         val failures  = results.filterIsInstance<DeliveryOcrParser.ParseResult.Failed>()
 
@@ -299,7 +306,7 @@ class DeliveryOcrActivity : AppCompatActivity() {
     private fun launchCamera() {
         val file = File(cacheDir, "delivery_ocr_${System.currentTimeMillis()}.jpg")
         photoUri = FileProvider.getUriForFile(this,
-            "$packageName.provider", file)
+            "$packageName.retail.provider", file)
         cameraLauncher.launch(photoUri!!)
     }
 
