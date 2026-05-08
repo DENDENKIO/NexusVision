@@ -103,8 +103,8 @@ class RetailRepository(private val db: RetailDatabase) {
             ProductMaster(
                 janCode     = record.janCode,
                 productName = record.productName,
-                spec        = record.spec,
-                lastDeliveryDate = record.date
+                maker       = record.maker,
+                spec        = record.spec
             )
         )
         // 納品レコード保存

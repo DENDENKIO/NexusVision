@@ -204,7 +204,7 @@ class CsvImportActivity : AppCompatActivity() {
         CsvImporter.CsvType.DELIVERY ->
             "納品CSV形式:\n企画名, 納品日, 部門, JANコード, メーカー, 商品名, 規格, 数量, 備考\n重複判定: 納品日 + JANコード + 数量"
         CsvImporter.CsvType.PRODUCT  ->
-            "商品CSV形式:\nJANコード, 商品名, 規格, 最終納品日\n重複判定: JANコードのみ"
+            "商品CSV形式:\nJANコード, 商品名, メーカー, 規格\n重複判定: JANコードのみ"
     }
 
     private fun makeButton(label: String, color: String, onClick: () -> Unit) =

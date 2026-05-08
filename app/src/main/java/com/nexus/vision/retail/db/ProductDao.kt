@@ -26,11 +26,12 @@ interface ProductDao {
     @Query("SELECT * FROM product_master WHERE janCode = :jan LIMIT 1")
     suspend fun findByJan(jan: String): ProductMaster?
 
-    /** 商品名・JANコード検索 */
+    /** 商品名・JANコード・メーカー検索 */
     @Query("""
         SELECT * FROM product_master
         WHERE janCode     LIKE '%' || :query || '%'
            OR productName LIKE '%' || :query || '%'
+           OR maker       LIKE '%' || :query || '%'
            OR spec        LIKE '%' || :query || '%'
         ORDER BY productName
     """)
@@ -41,23 +42,23 @@ interface ProductDao {
 
     /**
      * CSVインポート用 upsert
-     * janCode が一致 → productName/spec/lastDeliveryDate を上書き
+     * janCode が一致 → productName/maker/spec を上書き
      * 一致なし → 新規追加
      */
     @Query("""
-        INSERT INTO product_master (janCode, productName, spec, registeredAt, lastDeliveryDate)
-        VALUES (:janCode, :productName, :spec, :registeredAt, :lastDeliveryDate)
+        INSERT INTO product_master (janCode, productName, maker, spec, registeredAt)
+        VALUES (:janCode, :productName, :maker, :spec, :registeredAt)
         ON CONFLICT(janCode)
         DO UPDATE SET
             productName      = excluded.productName,
-            spec             = excluded.spec,
-            lastDeliveryDate = excluded.lastDeliveryDate
+            maker            = excluded.maker,
+            spec             = excluded.spec
     """)
     suspend fun upsert(
         janCode:          String,
         productName:      String,
+        maker:            String,
         spec:             String,
-        registeredAt:     Long,
-        lastDeliveryDate: String
+        registeredAt:     Long
     )
 }

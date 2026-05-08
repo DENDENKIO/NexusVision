@@ -171,8 +171,8 @@ object CsvImporter {
 
         val iJan      = findCol(header, "JAN", "JANコード", "jan", "バーコード")
         val iName     = findCol(header, "商品名", "品名")
+        val iMaker    = findCol(header, "メーカー", "MAKER", "製造")
         val iSpec     = findCol(header, "規格", "サイズ")
-        val iLastDate = findCol(header, "最終納品日", "lastDeliveryDate")
 
         if (iJan < 0) {
             return ImportResult(CsvType.PRODUCT, 0, 0, 0,
@@ -198,9 +198,9 @@ object CsvImporter {
                 dao.upsert(
                     janCode          = jan,
                     productName      = if (iName     >= 0) row.getOrElse(iName)     { "" }.trim() else "",
+                    maker            = if (iMaker    >= 0) row.getOrElse(iMaker)    { "" }.trim() else "",
                     spec             = if (iSpec     >= 0) row.getOrElse(iSpec)     { "" }.trim() else "",
-                    registeredAt     = existing?.registeredAt ?: now,
-                    lastDeliveryDate = if (iLastDate >= 0) row.getOrElse(iLastDate) { "" }.trim() else ""
+                    registeredAt     = existing?.registeredAt ?: now
                 )
 
                 if (existing != null) updated++ else inserted++

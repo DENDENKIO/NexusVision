@@ -61,7 +61,7 @@ class ProductListActivity : AppCompatActivity() {
 
         // 検索バー
         val searchBar = EditText(this).apply {
-            hint = "JANコード / 商品名 / 規格 で検索"
+            hint = "JANコード / 商品名 / メーカー / 規格 で検索"
             setTextColor(Color.WHITE)
             setHintTextColor(Color.parseColor("#555566"))
             setBackgroundColor(Color.parseColor("#1C1C2E"))
@@ -101,7 +101,7 @@ class ProductListActivity : AppCompatActivity() {
             orientation = LinearLayout.HORIZONTAL
             setBackgroundColor(Color.parseColor("#1A1A3A"))
             setPadding((4*dp).toInt(), (6*dp).toInt(), (4*dp).toInt(), (6*dp).toInt())
-            listOf("JANコード" to 1.8f, "商品名" to 2.2f,
+            listOf("JANコード" to 1.8f, "商品名" to 2.2f, "メーカー" to 1.2f,
                    "規格" to 1.2f, "初回登録日" to 1.2f).forEach { (n, w) ->
                 addView(TextView(context).apply {
                     text = n; textSize = 11f
@@ -155,9 +155,9 @@ class ProductListActivity : AppCompatActivity() {
                     appendLine("━━━ 商品情報 ━━━")
                     appendLine("JANコード : ${p.janCode}")
                     appendLine("商品名    : ${p.productName}")
+                    appendLine("メーカー  : ${p.maker}")
                     appendLine("規格      : ${p.spec}")
-                    appendLine("初回登録  : ${p.registeredAt.toDateStr()}")
-                    append(    "最終納品  : ${p.lastDeliveryDate.ifBlank { "-" }}")
+                    append(    "初回登録  : ${p.registeredAt.toDateStr()}")
                 }
                 setTextColor(Color.parseColor("#CCCCEE"))
                 textSize = 13f
@@ -236,8 +236,9 @@ class ProductListActivity : AppCompatActivity() {
             setTextColor(Color.parseColor("#8888AA")); textSize = 12f
             setPadding(0, 0, 0, (8*dp).toInt())
         })
-        val etName = field("商品名", p.productName)
-        val etSpec = field("規格",   p.spec)
+        val etName  = field("商品名", p.productName)
+        val etMaker = field("メーカー", p.maker)
+        val etSpec  = field("規格",   p.spec)
 
         AlertDialog.Builder(this)
             .setTitle("✏️ 商品編集")
@@ -246,6 +247,7 @@ class ProductListActivity : AppCompatActivity() {
                 lifecycleScope.launch {
                     repo.updateProduct(p.copy(
                         productName = etName.text.toString(),
+                        maker       = etMaker.text.toString(),
                         spec        = etSpec.text.toString()
                     ))
                     Toast.makeText(this@ProductListActivity,
@@ -304,7 +306,7 @@ class ProductAdapter(
             orientation = LinearLayout.HORIZONTAL
             setPadding((4*dp).toInt(), (7*dp).toInt(), (4*dp).toInt(), (7*dp).toInt())
         }
-        val weights = floatArrayOf(1.8f, 2.2f, 1.2f, 1.2f)
+        val weights = floatArrayOf(1.8f, 2.2f, 1.2f, 1.2f, 1.2f)
         val cells = weights.map { w ->
             TextView(ctx).apply {
                 textSize = 11f; setTextColor(Color.parseColor("#DDDDEE"))
@@ -324,8 +326,9 @@ class ProductAdapter(
         val sdf = java.text.SimpleDateFormat("yy/MM/dd", java.util.Locale.JAPAN)
         holder.cells[0].text = p.janCode
         holder.cells[1].text = p.productName
-        holder.cells[2].text = p.spec
-        holder.cells[3].text = sdf.format(java.util.Date(p.registeredAt))
+        holder.cells[2].text = p.maker
+        holder.cells[3].text = p.spec
+        holder.cells[4].text = sdf.format(java.util.Date(p.registeredAt))
 
         holder.row.setOnClickListener { onTap(p) }
         holder.row.setOnLongClickListener {

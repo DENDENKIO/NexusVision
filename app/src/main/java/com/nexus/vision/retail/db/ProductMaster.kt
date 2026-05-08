@@ -1,5 +1,6 @@
 package com.nexus.vision.retail.db
 
+import androidx.room.ColumnInfo
 import androidx.room.Entity
 import androidx.room.PrimaryKey
 
@@ -16,11 +17,13 @@ data class ProductMaster(
     val janCode: String,
 
     val productName: String,
+
+    /** メーカー名 — 商品名の右隣 */
+    @ColumnInfo(defaultValue = "")
+    val maker: String = "",
+
     val spec: String,
 
     /** 初回登録日時 */
-    val registeredAt: Long = System.currentTimeMillis(),
-
-    /** 最終納品日 (更新用) */
-    val lastDeliveryDate: String = ""
+    val registeredAt: Long = System.currentTimeMillis()
 )
