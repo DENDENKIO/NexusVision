@@ -181,9 +181,13 @@ fun MainScreen(
                     val allSources = com.nexus.vision.search.SearchSourceRegistry.getAll()
                     
                     DbSourceSelector(
-                        sources = allSources,
-                        selectedIds = selectedSources,
-                        onToggle = { viewModel.toggleSource(it) }
+                        sources      = allSources,
+                        selectedIds  = selectedSources,
+                        currentInput = uiState.inputText,
+                        onToggle     = { sourceId, displayName, nowSelected ->
+                            viewModel.toggleSourceWithText(sourceId, displayName, nowSelected)
+                        },
+                        onClearAll   = { viewModel.clearAllSources() }
                     )
 
                     ChatInput(
@@ -293,28 +297,52 @@ fun ThermalBadge(levelName: String) {
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun DbSourceSelector(
-    sources:         List<com.nexus.vision.search.SearchSource>,
-    selectedIds:     Set<String>,
-    onToggle:        (String) -> Unit
+    sources:      List<com.nexus.vision.search.SearchSource>,
+    selectedIds:  Set<String>,
+    currentInput: String,
+    onToggle:     (sourceId: String, displayName: String, nowSelected: Boolean) -> Unit,
+    onClearAll:   () -> Unit
 ) {
+    if (sources.isEmpty()) return
+
     Row(
         modifier = Modifier
             .horizontalScroll(rememberScrollState())
             .padding(horizontal = 8.dp, vertical = 4.dp),
         horizontalArrangement = Arrangement.spacedBy(6.dp)
     ) {
-        // 「全DB」チップ
-        FilterChip(
-            selected = selectedIds.isEmpty(),
-            onClick  = { /* 全選択解除 */ },
-            label    = { Text("🗄️ 全DB") }
-        )
-        sources.forEach { src ->
-            val id = (src as? com.nexus.vision.search.IdentifiableSource)?.sourceId ?: return@forEach
+        // 「全DB」チップ（選択中DBが1つ以上あるときに表示）
+        if (selectedIds.isNotEmpty()) {
             FilterChip(
-                selected = id in selectedIds,
-                onClick  = { onToggle(id) },
-                label    = { Text("${src.icon} ${src.displayName}") }
+                selected = false,
+                onClick  = onClearAll,
+                label    = { Text("✕ 全解除") }
+            )
+        } else {
+            FilterChip(
+                selected = true,
+                onClick  = { /* 全DB状態は維持 */ },
+                label    = { Text("🗄️ 全DB") }
+            )
+        }
+
+        sources.forEach { src ->
+            val id = (src as? com.nexus.vision.search.IdentifiableSource)?.sourceId
+                ?: return@forEach
+            val isSelected = id in selectedIds
+
+            FilterChip(
+                selected = isSelected,
+                onClick  = {
+                    // nowSelected: タップ後の状態（現在の逆）
+                    onToggle(id, src.displayName, !isSelected)
+                },
+                label = {
+                    Text(
+                        text = "${src.icon} ${src.displayName}",
+                        style = MaterialTheme.typography.labelSmall
+                    )
+                }
             )
         }
     }

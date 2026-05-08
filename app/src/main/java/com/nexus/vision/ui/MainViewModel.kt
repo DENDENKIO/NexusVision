@@ -270,10 +270,43 @@ class MainViewModel : ViewModel() {
         _uiState.value = _uiState.value.copy(inputText = newText)
     }
 
-    /** 検索ソースの選択切り替え（空=全DB） */
-    fun toggleSource(sourceId: String) {
+    /** タグON: チャット欄先頭に "/db [DB名] " を挿入、OFF: 解除 */
+    fun toggleSourceWithText(sourceId: String, displayName: String, nowSelected: Boolean) {
         _selectedSources.update { current ->
             if (sourceId in current) current - sourceId else current + sourceId
+        }
+
+        val currentText = _uiState.value.inputText
+
+        if (nowSelected) {
+            // ON → チャット欄先頭に "/db [DB名] " を挿入
+            val prefix = "/db ${displayName.replace(Regex("[📦🏷️🗄️]\\s*"), "")} "
+            if (!currentText.startsWith("/db")) {
+                _uiState.update { it.copy(inputText = prefix + currentText) }
+            } else {
+                // 既存の /db プレフィックスにDB名を追記
+                _uiState.update { it.copy(inputText = prefix + currentText.removePrefix("/db ")) }
+            }
+        } else {
+            // OFF → そのDBのプレフィックスをチャット欄から削除
+            val cleanName = displayName.replace(Regex("[📦🏷️🗄️]\\s*"), "").trim()
+            val newText = currentText
+                .replace("/db $cleanName ", "")
+                .replace("/db $cleanName　", "")
+                .let { if (it.startsWith("/db ") && it.trim() == "/db") "" else it }
+                .trimStart()
+            _uiState.update { it.copy(inputText = newText) }
+        }
+    }
+
+    /** 全DB選択解除（全DBチップ押下時）*/
+    fun clearAllSources() {
+        _selectedSources.update { emptySet() }
+        // チャット欄の /db プレフィックスを除去
+        val currentText = _uiState.value.inputText
+        if (currentText.startsWith("/db")) {
+            val cleaned = currentText.substringAfter("/db ").substringAfter(" ").trimStart()
+            _uiState.update { it.copy(inputText = cleaned) }
         }
     }
 
