@@ -225,7 +225,9 @@ class DeliveryOcrActivity : AppCompatActivity() {
         setStatus("🔍 OCR解析中...")
         saveBtn.visibility  = View.GONE
         retakeBtn.visibility = View.VISIBLE
-        previewImg.setImageURI(uri)
+        
+        // 巨大画像によるクラッシュ回避のためサムネイル表示
+        showThumbnail(uri)
 
         lifecycleScope.launch(Dispatchers.IO) {
             try {
@@ -376,6 +378,45 @@ class DeliveryOcrActivity : AppCompatActivity() {
 
         val matrix = Matrix().apply { postRotate(rotation) }
         return Bitmap.createBitmap(bitmap, 0, 0, bitmap.width, bitmap.height, matrix, true)
+    }
+
+    /**
+     * 巨大画像による Canvas: trying to draw too large bitmap クラッシュを回避
+     * ImageView のサイズに合わせてダウンサンプリングして表示
+     */
+    private fun showThumbnail(uri: Uri) {
+        val targetW = previewImg.width.takeIf  { it > 0 } ?: 800
+        val targetH = previewImg.height.takeIf { it > 0 } ?: 600
+
+        try {
+            // サイズのみ取得
+            val opts = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+            contentResolver.openInputStream(uri)?.use {
+                BitmapFactory.decodeStream(it, null, opts)
+            }
+            val w = opts.outWidth; val h = opts.outHeight
+            if (w <= 0 || h <= 0) {
+                previewImg.setImageURI(uri)
+                return
+            }
+
+            // 適切な sampleSize を計算 (ImageViewの2倍程度まで許容)
+            var sampleSize = 1
+            while (w / sampleSize > targetW * 2 || h / sampleSize > targetH * 2) {
+                sampleSize *= 2
+            }
+
+            val decodeOpts = BitmapFactory.Options().apply {
+                inSampleSize = sampleSize
+            }
+            val thumb = contentResolver.openInputStream(uri)?.use {
+                BitmapFactory.decodeStream(it, null, decodeOpts)
+            }
+            previewImg.setImageBitmap(thumb)
+        } catch (e: Exception) {
+            Log.e("DeliveryOcr", "Thumbnail failed", e)
+            previewImg.setImageURI(uri)
+        }
     }
 
     private fun lp(w: Int, h: Int, weight: Float = 0f) =
