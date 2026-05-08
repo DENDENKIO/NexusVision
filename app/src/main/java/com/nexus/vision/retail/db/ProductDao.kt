@@ -26,16 +26,18 @@ interface ProductDao {
     @Query("SELECT * FROM product_master WHERE janCode = :jan LIMIT 1")
     suspend fun findByJan(jan: String): ProductMaster?
 
-    /** 商品名・JANコード・メーカー検索 */
+    @Query("SELECT * FROM product_master ORDER BY productName ASC")
+    suspend fun getAll(): List<ProductMaster>
+
     @Query("""
         SELECT * FROM product_master
-        WHERE janCode     LIKE '%' || :query || '%'
-           OR productName LIKE '%' || :query || '%'
-           OR maker       LIKE '%' || :query || '%'
-           OR spec        LIKE '%' || :query || '%'
-        ORDER BY productName
+        WHERE janCode     LIKE '%' || :q || '%'
+           OR productName LIKE '%' || :q || '%'
+           OR maker       LIKE '%' || :q || '%'
+           OR spec        LIKE '%' || :q || '%'
+        ORDER BY productName ASC
     """)
-    suspend fun search(query: String): List<ProductMaster>
+    suspend fun searchByToken(q: String): List<ProductMaster>
 
     @Query("SELECT COUNT(*) FROM product_master")
     suspend fun count(): Int

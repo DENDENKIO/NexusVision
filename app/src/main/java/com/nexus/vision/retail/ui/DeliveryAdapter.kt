@@ -20,53 +20,62 @@ class DeliveryAdapter(
             override fun areContentsTheSame(a: DeliveryRecord, b: DeliveryRecord) = a == b
         }
 
-        // 列幅比率
-        private val COL_WEIGHTS = floatArrayOf(
-            1.1f, // 日付
-            1.5f, // JANコード
-            2.0f, // 商品名
-            1.2f, // 規格
-            0.7f, // 数量
-            1.5f  // 備考
+        // 列定義: ラベル to 固定幅dp（ヘッダと完全一致）
+        val COLUMNS = listOf(
+            "日付"      to 90,
+            "部門"      to 44,
+            "JAN"      to 112,
+            "メーカー"  to 100,
+            "商品名"    to 200,
+            "規格"      to 90,
+            "数量"      to 48,
+            "備考"      to 120
         )
     }
 
-    inner class VH(val row: LinearLayout) : RecyclerView.ViewHolder(row) {
-        val cells = (0 until row.childCount).map { row.getChildAt(it) as TextView }
-    }
+    inner class VH(
+        val row:   LinearLayout,
+        val cells: List<TextView>
+    ) : RecyclerView.ViewHolder(row)
 
     override fun onCreateViewHolder(parent: ViewGroup, viewType: Int): VH {
         val ctx = parent.context
         val dp  = ctx.resources.displayMetrics.density
+        fun Int.dp() = (this * dp).toInt()
+
         val row = LinearLayout(ctx).apply {
             orientation = LinearLayout.HORIZONTAL
-            setBackgroundColor(Color.parseColor("#1C1C2E"))
-            setPadding((4 * dp).toInt(), (6 * dp).toInt(), (4 * dp).toInt(), (6 * dp).toInt())
+            setPadding(4.dp(), 5.dp(), 4.dp(), 5.dp())
         }
-        COL_WEIGHTS.forEach { w ->
-            row.addView(TextView(ctx).apply {
-                textSize = 11f; setTextColor(Color.WHITE)
-                layoutParams = LinearLayout.LayoutParams(0, -2, w)
-                maxLines = 2; ellipsize = android.text.TextUtils.TruncateAt.END
-            })
+
+        val cells = COLUMNS.map { (_, widthDp) ->
+            TextView(ctx).apply {
+                textSize = 10f
+                setTextColor(Color.parseColor("#DDDDEE"))
+                setSingleLine()
+                ellipsize = android.text.TextUtils.TruncateAt.END
+                setPadding(2.dp(), 0, 2.dp(), 0)
+                layoutParams = LinearLayout.LayoutParams(widthDp.dp(), -2)
+            }.also { row.addView(it) }
         }
-        return VH(row)
+
+        return VH(row, cells)
     }
 
     override fun onBindViewHolder(holder: VH, position: Int) {
         val r = getItem(position)
-        // 縞模様
         holder.row.setBackgroundColor(
             if (position % 2 == 0) Color.parseColor("#1C1C2E")
             else                   Color.parseColor("#161622")
         )
-        val cells = holder.cells
-        cells[0].text = r.date
-        cells[1].text = r.janCode
-        cells[2].text = r.productName
-        cells[3].text = r.spec
-        cells[4].text = r.quantity.toString()
-        cells[5].text = r.note
+        holder.cells[0].text = r.date
+        holder.cells[1].text = r.department
+        holder.cells[2].text = r.janCode
+        holder.cells[3].text = r.maker
+        holder.cells[4].text = r.productName
+        holder.cells[5].text = r.spec
+        holder.cells[6].text = r.quantity.toString()
+        holder.cells[7].text = r.note
 
         holder.row.setOnLongClickListener {
             android.app.AlertDialog.Builder(holder.row.context)

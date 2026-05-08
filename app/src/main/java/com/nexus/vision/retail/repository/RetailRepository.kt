@@ -1,7 +1,9 @@
 package com.nexus.vision.retail.repository
 
 import com.nexus.vision.retail.db.*
+import com.nexus.vision.retail.search.FuzzyNormalizer
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.first
 
 /**
  * 納品・商品データベースの操作窓口
@@ -58,8 +60,25 @@ class RetailRepository(private val db: RetailDatabase) {
     suspend fun updateDelivery(record: DeliveryRecord) = deliveryDao.update(record)
     suspend fun deleteDelivery(record: DeliveryRecord) = deliveryDao.delete(record)
 
-    suspend fun searchDeliveries(query: String, project: String = "") =
-        deliveryDao.search(query, project)
+    /**
+     * あいまい検索（カタカナ/ひらがな/全角半角 対応）
+     * 複数スペース区切り → AND絞り込み
+     */
+    suspend fun searchDeliveries(query: String, project: String = ""): List<DeliveryRecord> {
+        val tokens = FuzzyNormalizer.tokenize(query)
+        if (tokens.isEmpty()) return allDeliveries.first()
+
+        // 各トークンで検索 → AND絞り込み（正規化形 + カタカナ両方で検索）
+        var results: List<DeliveryRecord>? = null
+        for (token in tokens) {
+            val kana = FuzzyNormalizer.hiraganaToKatakana(token)
+            val hitH = deliveryDao.searchByToken(token, project)
+            val hitK = if (kana != token) deliveryDao.searchByToken(kana, project) else emptyList()
+            val merged = (hitH + hitK).distinctBy { it.id }
+            results = results?.filter { r -> merged.any { it.id == r.id } } ?: merged
+        }
+        return results ?: emptyList()
+    }
 
     // ────────────────────────────────────────────────
     // 商品データ
@@ -79,8 +98,20 @@ class RetailRepository(private val db: RetailDatabase) {
     suspend fun findProduct(jan: String): ProductMaster? =
         productDao.findByJan(jan)
 
-    suspend fun searchProducts(query: String) =
-        productDao.search(query)
+    suspend fun searchProducts(query: String): List<ProductMaster> {
+        val tokens = FuzzyNormalizer.tokenize(query)
+        if (tokens.isEmpty()) return productDao.getAll()
+
+        var results: List<ProductMaster>? = null
+        for (token in tokens) {
+            val kana = FuzzyNormalizer.hiraganaToKatakana(token)
+            val hitH = productDao.searchByToken(token)
+            val hitK = if (kana != token) productDao.searchByToken(kana) else emptyList()
+            val merged = (hitH + hitK).distinctBy { it.janCode }
+            results = results?.filter { r -> merged.any { it.janCode == r.janCode } } ?: merged
+        }
+        return results ?: emptyList()
+    }
 
     suspend fun updateProduct(product: ProductMaster) =
         productDao.update(product)

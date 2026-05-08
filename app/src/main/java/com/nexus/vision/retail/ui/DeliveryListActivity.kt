@@ -1,5 +1,6 @@
 package com.nexus.vision.retail.ui
 
+import android.graphics.Color
 import android.os.Bundle
 import android.text.Editable
 import android.text.TextWatcher
@@ -67,7 +68,7 @@ class DeliveryListActivity : AppCompatActivity() {
 
         // 検索バー
         val searchBar = EditText(this).apply {
-            hint = "JANコード / 商品名 / 日付 で検索"
+            hint = "商品名・メーカー・JAN・日付・部門 (ひらがな可)"
             addTextChangedListener(object : TextWatcher {
                 override fun afterTextChanged(s: Editable?) {
                     currentQuery = s.toString()
@@ -93,11 +94,23 @@ class DeliveryListActivity : AppCompatActivity() {
         root.addView(btnRow)
 
         // RecyclerView (表形式)
+        val tableContainer = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+        }
+        tableContainer.addView(buildTableHeader())
+
         val rv = RecyclerView(this).apply {
             layoutManager = LinearLayoutManager(this@DeliveryListActivity)
             this.adapter  = this@DeliveryListActivity.adapter
         }
-        root.addView(rv, matchWidth(0, weight = 1f))
+        tableContainer.addView(rv, LinearLayout.LayoutParams(-2, 0, 1f))
+
+        // HorizontalScrollView で包んで横スクロール有効化
+        val hScroll = HorizontalScrollView(this).apply {
+            isHorizontalScrollBarEnabled = true
+            addView(tableContainer)
+        }
+        root.addView(hScroll, matchWidth(0, weight = 1f))
 
         setContentView(root)
         title = "📦 納品データベース"
@@ -142,6 +155,25 @@ class DeliveryListActivity : AppCompatActivity() {
             }
             currentRecords = results
             adapter.submitList(results)
+        }
+    }
+
+    private fun buildTableHeader(): LinearLayout {
+        val dp = resources.displayMetrics.density
+        fun Int.dp() = (this * dp).toInt()
+        return LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            setBackgroundColor(Color.parseColor("#1A1A3A"))
+            setPadding(4.dp(), 6.dp(), 4.dp(), 6.dp())
+            DeliveryAdapter.COLUMNS.forEach { (label, widthDp) ->
+                addView(TextView(this@DeliveryListActivity).apply {
+                    text = label; textSize = 11f
+                    setTextColor(Color.parseColor("#AACCFF"))
+                    setSingleLine()
+                    setPadding(2.dp(), 0, 2.dp(), 0)
+                    layoutParams = LinearLayout.LayoutParams(widthDp.dp(), -2)
+                })
+            }
         }
     }
 

@@ -37,17 +37,27 @@ interface DeliveryDao {
     @Query("SELECT DISTINCT projectName FROM delivery_records ORDER BY projectName")
     fun observeProjects(): Flow<List<String>>
 
-    // ── 検索 (JANコード / 商品名 / 日付 複合) ─────────────────
+    /**
+     * あいまい検索
+     * q: FuzzyNormalizer で正規化済みのトークン（1つ）
+     * 呼び出し側でトークンごとに絞り込む
+     */
     @Query("""
         SELECT * FROM delivery_records
         WHERE (:project = '' OR projectName = :project)
-          AND (janCode     LIKE '%' || :query || '%'
-            OR productName LIKE '%' || :query || '%'
-            OR date        LIKE '%' || :query || '%'
-            OR note        LIKE '%' || :query || '%')
+          AND (
+               janCode      LIKE '%' || :q || '%'
+            OR productName  LIKE '%' || :q || '%'
+            OR maker        LIKE '%' || :q || '%'
+            OR department   LIKE '%' || :q || '%'
+            OR date         LIKE '%' || :q || '%'
+            OR spec         LIKE '%' || :q || '%'
+            OR note         LIKE '%' || :q || '%'
+            OR projectName  LIKE '%' || :q || '%'
+          )
         ORDER BY date DESC
     """)
-    suspend fun search(query: String, project: String = ""): List<DeliveryRecord>
+    suspend fun searchByToken(q: String, project: String = ""): List<DeliveryRecord>
 
     // ── 重複チェック用 ────────────────────────────────────────
     @Query("""

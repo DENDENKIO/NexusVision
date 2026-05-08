@@ -6,6 +6,7 @@ import android.os.Bundle
 import android.text.*
 import android.view.*
 import android.widget.EditText
+import android.widget.HorizontalScrollView
 import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
@@ -20,7 +21,6 @@ import com.nexus.vision.retail.db.*
 import com.nexus.vision.retail.repository.RetailRepository
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.first
-
 /**
  * 商品データベース画面
  *
@@ -30,6 +30,16 @@ import kotlinx.coroutines.flow.first
  * - 長押し → 編集 / 削除
  */
 class ProductListActivity : AppCompatActivity() {
+
+    companion object {
+        val COLUMNS = listOf(
+            "JAN"      to 112,
+            "商品名"    to 200,
+            "メーカー"  to 100,
+            "規格"      to 90,
+            "登録日"    to 80
+        )
+    }
 
     private lateinit var repo:    RetailRepository
     private lateinit var adapter: ProductAdapter
@@ -61,7 +71,7 @@ class ProductListActivity : AppCompatActivity() {
 
         // 検索バー
         val searchBar = EditText(this).apply {
-            hint = "JANコード / 商品名 / メーカー / 規格 で検索"
+            hint = "商品名・メーカー・JAN・規格 (ひらがな可)"
             setTextColor(Color.WHITE)
             setHintTextColor(Color.parseColor("#555566"))
             setBackgroundColor(Color.parseColor("#1C1C2E"))
@@ -82,31 +92,42 @@ class ProductListActivity : AppCompatActivity() {
         }
         root.addView(countTv, lp(-1, -2))
 
-        // テーブルヘッダー
-        root.addView(buildHeader(), lp(-1, -2))
+        // RecyclerView (表形式)
+        val tableContainer = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+        }
+        tableContainer.addView(buildHeader())
 
-        // 一覧
         val rv = RecyclerView(this).apply {
             layoutManager = LinearLayoutManager(this@ProductListActivity)
             adapter = this@ProductListActivity.adapter
         }
-        root.addView(rv, lp(-1, 0, 1f))
+        tableContainer.addView(rv, lp(-2, 0, 1f))
+
+        // HorizontalScrollView で包んで横スクロール有効化
+        val hScroll = HorizontalScrollView(this).apply {
+            isHorizontalScrollBarEnabled = true
+            addView(tableContainer)
+        }
+        root.addView(hScroll, lp(-1, 0, 1f))
 
         return root
     }
 
     private fun buildHeader(): LinearLayout {
         val dp = resources.displayMetrics.density
+        fun Int.dp() = (this * dp).toInt()
         return LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             setBackgroundColor(Color.parseColor("#1A1A3A"))
-            setPadding((4*dp).toInt(), (6*dp).toInt(), (4*dp).toInt(), (6*dp).toInt())
-            listOf("JANコード" to 1.8f, "商品名" to 2.2f, "メーカー" to 1.2f,
-                   "規格" to 1.2f, "初回登録日" to 1.2f).forEach { (n, w) ->
-                addView(TextView(context).apply {
-                    text = n; textSize = 11f
+            setPadding(4.dp(), 6.dp(), 4.dp(), 6.dp())
+            COLUMNS.forEach { (label, widthDp) ->
+                addView(TextView(this@ProductListActivity).apply {
+                    text = label; textSize = 11f
                     setTextColor(Color.parseColor("#AACCFF"))
-                    layoutParams = LinearLayout.LayoutParams(0, -2, w)
+                    setSingleLine()
+                    setPadding(2.dp(), 0, 2.dp(), 0)
+                    layoutParams = LinearLayout.LayoutParams(widthDp.dp(), -2)
                 })
             }
         }
@@ -302,16 +323,21 @@ class ProductAdapter(
     override fun onCreateViewHolder(parent: ViewGroup, viewType: Int): VH {
         val ctx = parent.context
         val dp  = ctx.resources.displayMetrics.density
+        fun Int.dp() = (this * dp).toInt()
+
         val row = LinearLayout(ctx).apply {
             orientation = LinearLayout.HORIZONTAL
-            setPadding((4*dp).toInt(), (7*dp).toInt(), (4*dp).toInt(), (7*dp).toInt())
+            setPadding(4.dp(), 5.dp(), 4.dp(), 5.dp())
         }
-        val weights = floatArrayOf(1.8f, 2.2f, 1.2f, 1.2f, 1.2f)
-        val cells = weights.map { w ->
+
+        val cells = ProductListActivity.COLUMNS.map { (_, widthDp) ->
             TextView(ctx).apply {
-                textSize = 11f; setTextColor(Color.parseColor("#DDDDEE"))
-                layoutParams = LinearLayout.LayoutParams(0, -2, w)
-                maxLines = 2; ellipsize = android.text.TextUtils.TruncateAt.END
+                textSize = 10f
+                setTextColor(Color.parseColor("#DDDDEE"))
+                setSingleLine()
+                ellipsize = android.text.TextUtils.TruncateAt.END
+                setPadding(2.dp(), 0, 2.dp(), 0)
+                layoutParams = LinearLayout.LayoutParams(widthDp.dp(), -2)
             }.also { row.addView(it) }
         }
         return VH(row, cells)
