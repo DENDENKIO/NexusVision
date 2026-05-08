@@ -202,8 +202,16 @@ class DeliveryOcrActivity : AppCompatActivity() {
             orientation = LinearLayout.HORIZONTAL
             setBackgroundColor(Color.parseColor("#1A1A3A"))
             setPadding((4 * dp).toInt(), (6 * dp).toInt(), (4 * dp).toInt(), (6 * dp).toInt())
-            listOf("日付" to 1.1f, "JAN" to 1.5f, "商品名" to 2.0f,
-                   "規格" to 1.2f, "数量" to 0.7f, "備考" to 1.5f).forEach { (name, w) ->
+            listOf(
+                "日付"     to 1.1f,
+                "部門"     to 0.6f,
+                "JAN"     to 1.4f,
+                "メーカー" to 1.0f,
+                "商品名"   to 1.8f,
+                "規格"     to 1.0f,
+                "数量"     to 0.6f,
+                "備考"     to 1.0f
+            ).forEach { (name, w) ->
                 addView(TextView(context).apply {
                     text = name; textSize = 11f
                     setTextColor(Color.parseColor("#AACCFF"))
@@ -439,7 +447,7 @@ class OcrConfirmAdapter(
                 a.janCode == b.janCode && a.date == b.date
             override fun areContentsTheSame(a: DeliveryRecord, b: DeliveryRecord) = a == b
         }
-        private val COL_WEIGHTS = floatArrayOf(1.1f, 1.5f, 2.0f, 1.2f, 0.7f, 1.5f)
+        private val COL_WEIGHTS = floatArrayOf(1.1f, 0.6f, 1.4f, 1.0f, 1.8f, 1.0f, 0.6f, 1.0f)
     }
 
     inner class VH(val row: LinearLayout, val cells: List<TextView>, val editBtn: ImageButton)
@@ -476,11 +484,13 @@ class OcrConfirmAdapter(
             else                   Color.parseColor("#1A1A32")
         )
         holder.cells[0].text = r.date
-        holder.cells[1].text = r.janCode
-        holder.cells[2].text = r.productName
-        holder.cells[3].text = r.spec
-        holder.cells[4].text = r.quantity.toString()
-        holder.cells[5].text = r.note
+        holder.cells[1].text = r.department
+        holder.cells[2].text = r.janCode
+        holder.cells[3].text = r.maker
+        holder.cells[4].text = r.productName
+        holder.cells[5].text = r.spec
+        holder.cells[6].text = r.quantity.toString()
+        holder.cells[7].text = r.note
 
         holder.editBtn.setOnClickListener {
             showEditDialog(holder.row.context, position, r)
@@ -503,15 +513,17 @@ class OcrConfirmAdapter(
             layout.addView(this)
         }
 
-        val etDate = field("日付 (YYYY-MM-DD)",   r.date)
-        val etJan  = field("JANコード",             r.janCode)
-        val etName = field("商品名",               r.productName)
-        val etSpec = field("規格",                 r.spec)
-        val etQty  = field("数量",                 r.quantity.toString()).also {
+        val etDate   = field("日付 (YYYY-MM-DD)", r.date)
+        val etDept   = field("部門 (数字)",       r.department)
+        val etJan    = field("JANコード",         r.janCode)
+        val etMaker  = field("メーカー",          r.maker)
+        val etName   = field("商品名",            r.productName)
+        val etSpec   = field("規格",              r.spec)
+        val etQty    = field("数量",              r.quantity.toString()).also {
             it.inputType = android.text.InputType.TYPE_CLASS_NUMBER
         }
-        val etNote = field("備考",                 r.note)
-        val etProj = field("企画名",               r.projectName)
+        val etNote   = field("備考",              r.note)
+        val etProj   = field("企画名",            r.projectName)
 
         AlertDialog.Builder(ctx)
             .setTitle("✏️ 行を編集 (${pos+1}行目)")
@@ -519,7 +531,9 @@ class OcrConfirmAdapter(
             .setPositiveButton("確定") { _, _ ->
                 val updated = r.copy(
                     date        = etDate.text.toString(),
+                    department  = etDept.text.toString(),
                     janCode     = etJan.text.toString(),
+                    maker       = etMaker.text.toString(),
                     productName = etName.text.toString(),
                     spec        = etSpec.text.toString(),
                     quantity    = etQty.text.toString().toIntOrNull() ?: r.quantity,

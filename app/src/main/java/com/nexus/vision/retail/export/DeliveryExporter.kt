@@ -30,8 +30,8 @@ object DeliveryExporter {
 
     /** CSV カラム定義 */
     private val HEADERS = listOf(
-        "ID", "企画名", "納品日", "JANコード",
-        "商品名", "規格", "数量", "備考", "登録日時"
+        "ID", "企画名", "納品日", "部門", "JANコード",
+        "メーカー", "商品名", "規格", "数量", "備考", "登録日時"
     )
 
     // ─────────────────────────────────────────────────────────
@@ -71,7 +71,9 @@ object DeliveryExporter {
                             r.id.toString(),
                             r.projectName,
                             r.date,
+                            r.department,
                             r.janCode,
+                            r.maker,
                             r.productName,
                             r.spec,
                             r.quantity.toString(),
@@ -131,9 +133,10 @@ object DeliveryExporter {
                 writer.write(
                     toCsvRow(
                         listOf(
-                            r.id.toString(), r.projectName, r.date, r.janCode,
-                            r.productName, r.spec, r.quantity.toString(),
-                            r.note, dtFmt.format(Date(r.createdAt))
+                            r.id.toString(), r.projectName, r.date, r.department,
+                            r.janCode, r.maker, r.productName, r.spec,
+                            r.quantity.toString(), r.note,
+                            dtFmt.format(Date(r.createdAt))
                         )
                     ) + "\n"
                 )

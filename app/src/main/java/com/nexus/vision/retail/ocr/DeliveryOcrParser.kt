@@ -142,12 +142,15 @@ object DeliveryOcrParser {
     private fun detectColMapFromHeader(header: List<String>): ColMap {
         var date = -1; var jan = -1; var name = -1
         var spec = -1; var qty  = -1; var note = -1
+        var department = -1; var maker = -1
 
         header.forEachIndexed { i, cell ->
             val c = cell.trim()
             when {
-                c.contains(Regex("日付|日 付|DATE|納品日"))          -> date = i
+                c.contains(Regex("日付|日 付|DATE|納品日"))           -> date = i
+                c.contains(Regex("部門|部 門|DEPT|ブモン"))           -> department = i
                 c.contains(Regex("JAN|ＪＡＮ|jan|バーコード|コード")) -> jan  = i
+                c.contains(Regex("メーカー|製造|ﾒｰｶｰ|MAKER"))        -> maker = i
                 c.contains(Regex("商品名|品名|商 品"))               -> name = i
                 c.contains(Regex("規格|サイズ|内容量"))              -> spec = i
                 c.contains(Regex("数量|ケース|個数|本数|枚数|数"))   -> qty  = i
@@ -162,7 +165,7 @@ object DeliveryOcrParser {
             }
         }
 
-        return ColMap(date, jan, name, spec, qty, note)
+        return ColMap(date, jan, name, spec, qty, note, department, maker)
     }
 
     /**
@@ -182,8 +185,10 @@ object DeliveryOcrParser {
         var dateCol = -1
         var qtyCol  = -1
         var nameCol = -1
+        var deptCol = -1
+        var makerCol = -1
 
-        if (maxCols == 0) return ColMap(-1, -1, -1, -1, -1, -1)
+        if (maxCols == 0) return ColMap(-1, -1, -1, -1, -1, -1, -1, -1)
 
         // JAN列: 13桁数字が最も多く出る列
         val janScores = IntArray(maxCols)
@@ -218,6 +223,20 @@ object DeliveryOcrParser {
         qtyCol = qtyScores.indices.maxByOrNull { qtyScores[it] }
             ?.takeIf { qtyScores[it] > 0 } ?: -1
 
+        // 部門列: 1〜3桁の純粋な数字で、数量列・JAN列でない列
+        val deptScores = IntArray(maxCols)
+        sampleRows.forEach { row ->
+            row.forEachIndexed { i, cell ->
+                if (i >= maxCols || i == janCol || i == qtyCol || i == dateCol) return@forEachIndexed
+                val n = cell.trim()
+                if (n.all { it.isDigit() } && n.length in 1..3) deptScores[i]++
+            }
+        }
+        deptCol = deptScores.indices
+            .filter { it != janCol && it != qtyCol && it != dateCol }
+            .maxByOrNull { deptScores[it] }
+            ?.takeIf { deptScores[it] > 0 } ?: -1
+
         // 商品名列: JAN・日付・数量でない列のうち最も文字が長い列
         val lenScores = IntArray(maxCols)
         sampleRows.forEach { row ->
@@ -227,14 +246,18 @@ object DeliveryOcrParser {
             }
         }
         nameCol = lenScores.indices
-            .filter { it != janCol && it != dateCol && it != qtyCol }
+            .filter { it != janCol && it != dateCol && it != qtyCol && it != deptCol }
             .maxByOrNull { lenScores[it] }
             ?.takeIf { lenScores[it] > 0 } ?: -1
+
+        // メーカー列: 商品名列の直前の列（経験則）
+        makerCol = if (nameCol > 0 && nameCol - 1 != janCol && nameCol - 1 != deptCol)
+            nameCol - 1 else -1
 
         // 規格列: nameCol+1（経験則）
         val specCol = if (nameCol >= 0 && nameCol + 1 < maxCols && nameCol + 1 != qtyCol) nameCol + 1 else -1
 
-        return ColMap(dateCol, janCol, nameCol, specCol, qtyCol, note = -1)
+        return ColMap(dateCol, janCol, nameCol, specCol, qtyCol, note = -1, department = deptCol, maker = makerCol)
     }
 
     /**
@@ -284,6 +307,8 @@ object DeliveryOcrParser {
         }
 
         val note = cell(colMap.note)
+        val department = cell(colMap.department)
+        val maker = cell(colMap.maker)
 
         return ParseResult.Success(
             DeliveryRecord(
@@ -291,6 +316,8 @@ object DeliveryOcrParser {
                 date        = date,
                 janCode     = rawJan,
                 productName = name,
+                department  = department,
+                maker       = maker,
                 spec        = spec,
                 quantity    = qty,
                 note        = note
@@ -358,14 +385,23 @@ object DeliveryOcrParser {
         // 規格・備考: 残りの列
         val rest = cols.drop(janIdx + 1)
             .filter { it != qtyStr && it != prodName }
-        val spec = rest.firstOrNull() ?: ""
-        val note = rest.drop(1).joinToString(" ")
+        
+        // メーカー: JANと商品名の間にあれば採用
+        val maker = if (janIdx < cols.size - 2 && cols[janIdx + 1] != prodName) cols[janIdx + 1] else ""
+        // 部門: 日付とJANの間にあれば採用
+        val dateIdx = cols.indexOf(dateRaw)
+        val department = if (dateIdx >= 0 && dateIdx < janIdx - 1) cols[dateIdx + 1] else ""
+
+        val spec = rest.filter { it != maker }.firstOrNull() ?: ""
+        val note = rest.filter { it != maker && it != spec }.joinToString(" ")
 
         return ParseResult.Success(
             DeliveryRecord(
                 projectName = project,
                 date        = date,
+                department  = department,
                 janCode     = rawJan,
+                maker       = maker,
                 productName = prodName,
                 spec        = spec,
                 quantity    = quantity,
@@ -426,6 +462,8 @@ object DeliveryOcrParser {
         val name: Int,
         val spec: Int,
         val qty:  Int,
-        val note: Int
+        val note: Int,
+        val department: Int = -1,
+        val maker: Int = -1
     )
 }

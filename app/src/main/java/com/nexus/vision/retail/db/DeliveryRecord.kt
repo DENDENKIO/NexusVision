@@ -3,6 +3,7 @@ package com.nexus.vision.retail.db
 import androidx.room.Entity
 import androidx.room.PrimaryKey
 import androidx.room.Index
+import androidx.room.ColumnInfo
 
 /**
  * 納品データベース
@@ -26,8 +27,16 @@ data class DeliveryRecord(
     /** 納品日付 (例: "2026-04-26") */
     val date: String,
 
+    /** 部門コード (数字, 例: "2", "14") — 日付の右隣 */
+    @ColumnInfo(defaultValue = "")
+    val department: String = "",
+
     /** JANコード (13桁) */
     val janCode: String,
+
+    /** メーカー名 — 商品名の左隣 */
+    @ColumnInfo(defaultValue = "")
+    val maker: String = "",
 
     /** 商品名 */
     val productName: String,
