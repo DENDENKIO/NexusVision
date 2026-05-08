@@ -21,9 +21,11 @@ interface DeliveryDao {
     @Delete
     suspend fun delete(record: DeliveryRecord)
 
-    // ── 全件取得 (日付降順) ───────────────────────────────────
     @Query("SELECT * FROM delivery_records ORDER BY date DESC, createdAt DESC")
     fun observeAll(): Flow<List<DeliveryRecord>>
+
+    @Query("SELECT * FROM delivery_records ORDER BY date DESC, createdAt DESC")
+    suspend fun getAll(): List<DeliveryRecord>
 
     // ── 企画別 ────────────────────────────────────────────────
     @Query("""

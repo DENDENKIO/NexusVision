@@ -33,6 +33,8 @@ import com.nexus.vision.ncnn.RealEsrganBridge
 import com.nexus.vision.parser.ExcelCsvParser
 import com.nexus.vision.parser.PdfExtractor
 import com.nexus.vision.parser.SourceCodeParser
+import com.nexus.vision.search.*
+import com.nexus.vision.search.sources.*
 import com.nexus.vision.sheets.NexusSheetsIndex
 import com.nexus.vision.sheets.SheetsQueryEngine
 import kotlinx.coroutines.Dispatchers
@@ -41,6 +43,7 @@ import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.stateIn
+import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.File
@@ -131,6 +134,18 @@ class MainViewModel : ViewModel() {
         app.thermalMonitor.thermalLevel
             .stateIn(viewModelScope, SharingStarted.Eagerly, ThermalLevel.NONE)
 
+    // 検索ソース選択状態
+    private val _selectedSources = MutableStateFlow<Set<String>>(emptySet()) // 空=全DB
+    val selectedSources: StateFlow<Set<String>> = _selectedSources.asStateFlow()
+
+    // 最新検索結果
+    private val _searchResult = MutableStateFlow<SearchEngineResult?>(null)
+    val searchResult: StateFlow<SearchEngineResult?> = _searchResult.asStateFlow()
+
+    // DB検索モード中か
+    private val _isDbSearchMode = MutableStateFlow(false)
+    val isDbSearchMode: StateFlow<Boolean> = _isDbSearchMode.asStateFlow()
+
     init {
         viewModelScope.launch {
             engineManager.state.collect { state ->
@@ -166,6 +181,9 @@ class MainViewModel : ViewModel() {
                     "ファイルを共有すると登録され、チャットから横断検索できます。$welcomeExtra"
         )
         initSuperResolution()
+
+        // 検索ソースの初期化
+        SearchSourceRegistry.initAll(app.applicationContext)
 
         viewModelScope.launch {
             BatchEnhanceQueue.progress.collect { progress ->
@@ -252,6 +270,13 @@ class MainViewModel : ViewModel() {
         _uiState.value = _uiState.value.copy(inputText = newText)
     }
 
+    /** 検索ソースの選択切り替え（空=全DB） */
+    fun toggleSource(sourceId: String) {
+        _selectedSources.update { current ->
+            if (sourceId in current) current - sourceId else current + sourceId
+        }
+    }
+
     fun setSelectedImage(uri: Uri) {
         _uiState.value = _uiState.value.copy(
             selectedImageUri = uri,
@@ -330,14 +355,7 @@ class MainViewModel : ViewModel() {
         }
     }
 
-    // ── メッセージ送信 ──
-
-    fun sendMessage() {
-        val text = _uiState.value.inputText.trim()
-        val imageUri = _uiState.value.selectedImageUri
-
-        if (text.isBlank() && imageUri == null) return
-
+    private fun performSendMessage(text: String, imageUri: Uri?) {
         // --- Phase 14-1: SR モデル切替コマンド ---
         val isSrSwitchCommand = text.let {
             it.contains("SAFMN", ignoreCase = true) ||
@@ -587,6 +605,90 @@ class MainViewModel : ViewModel() {
                 _uiState.value = _uiState.value.copy(processingLabel = null)
             }
         }
+    }
+
+    fun sendMessage() {
+        val text = _uiState.value.inputText.trim()
+        val imageUri = _uiState.value.selectedImageUri
+
+        if (text.isBlank() && imageUri == null) return
+
+        // --- NexusSearch: DB検索またはGemma会話の自動振り分け ---
+        if (imageUri == null) {
+            handleChatInput(text)
+            return
+        }
+
+        performSendMessage(text, imageUri)
+    }
+
+    /** チャット送信の統合ハンドラ */
+    private fun handleChatInput(input: String) {
+        val parsed = IntentRouter.parse(input)
+
+        when (parsed.intent) {
+            IntentRouter.Intent.DB_SEARCH -> {
+                _isDbSearchMode.value = true
+                executeDbSearch(parsed.searchQuery,
+                    parsed.sourceFilter.ifEmpty { _selectedSources.value })
+            }
+            IntentRouter.Intent.GEMMA_CHAT -> {
+                _isDbSearchMode.value = false
+                performSendMessage(input, null)
+            }
+            IntentRouter.Intent.AMBIGUOUS -> {
+                // DB検索を先に実行、結果0件ならGemmaに流す
+                viewModelScope.launch {
+                    val result = NexusSearchEngine.search(parsed.searchQuery,
+                        _selectedSources.value)
+                    if (result.isEmpty) {
+                        _isDbSearchMode.value = false
+                        performSendMessage(input, null)
+                    } else {
+                        _isDbSearchMode.value = true
+                        _searchResult.value = result
+                        appendSearchResultToChat(result)
+                    }
+                }
+            }
+        }
+    }
+
+    private fun executeDbSearch(query: String, sourceIds: Set<String>) {
+        // ユーザー入力をチャットに追加
+        addMessage(ChatMessage(role = ChatMessage.Role.USER, text = query))
+        _uiState.value = _uiState.value.copy(inputText = "")
+
+        viewModelScope.launch {
+            val result = NexusSearchEngine.search(query, sourceIds)
+            _searchResult.value = result
+            appendSearchResultToChat(result)
+        }
+    }
+
+    /** 検索結果をチャットメッセージとして追加 */
+    private fun appendSearchResultToChat(result: SearchEngineResult) {
+        val msg = if (result.isEmpty) {
+            "🔍 「${result.query}」の検索結果: 0件\n対象: ${result.sources.joinToString("・")}"
+        } else {
+            buildString {
+                appendLine("🔍 「${result.query}」— ${result.summary}")
+                result.results.take(10).forEach { r ->
+                    appendLine("\n【${r.sourceName}】")
+                    r.fields.entries.take(5).forEach { (k, v) ->
+                        if (v.isNotBlank()) append("$k: $v  ")
+                    }
+                }
+                if (result.totalCount > 10)
+                    appendLine("\n...他${result.totalCount - 10}件")
+            }
+        }
+        // 既存のチャット履歴にアシスタントメッセージとして追加
+        addAssistantMessage(msg)
+    }
+
+    private fun addAssistantMessage(text: String) {
+        addMessage(ChatMessage(role = ChatMessage.Role.ASSISTANT, text = text))
     }
 
     private fun isFileUri(uri: Uri): Boolean {

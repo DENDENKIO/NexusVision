@@ -12,6 +12,14 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.navigationBars
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.IntrinsicSize
+import androidx.compose.foundation.layout.height
+import androidx.compose.material3.Card
+import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.FilterChip
 import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.itemsIndexed
@@ -168,6 +176,16 @@ fun MainScreen(
                         onCancel = { viewModel.cancelCropMode() }
                     )
                 } else {
+                    // DB選択チップ
+                    val selectedSources by viewModel.selectedSources.collectAsState()
+                    val allSources = com.nexus.vision.search.SearchSourceRegistry.getAll()
+                    
+                    DbSourceSelector(
+                        sources = allSources,
+                        selectedIds = selectedSources,
+                        onToggle = { viewModel.toggleSource(it) }
+                    )
+
                     ChatInput(
                         text = uiState.inputText,
                         onTextChange = { viewModel.updateInputText(it) },
@@ -269,5 +287,69 @@ fun ThermalBadge(levelName: String) {
             color = color,
             fontWeight = FontWeight.Bold
         )
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+fun DbSourceSelector(
+    sources:         List<com.nexus.vision.search.SearchSource>,
+    selectedIds:     Set<String>,
+    onToggle:        (String) -> Unit
+) {
+    Row(
+        modifier = Modifier
+            .horizontalScroll(rememberScrollState())
+            .padding(horizontal = 8.dp, vertical = 4.dp),
+        horizontalArrangement = Arrangement.spacedBy(6.dp)
+    ) {
+        // 「全DB」チップ
+        FilterChip(
+            selected = selectedIds.isEmpty(),
+            onClick  = { /* 全選択解除 */ },
+            label    = { Text("🗄️ 全DB") }
+        )
+        sources.forEach { src ->
+            val id = (src as? com.nexus.vision.search.IdentifiableSource)?.sourceId ?: return@forEach
+            FilterChip(
+                selected = id in selectedIds,
+                onClick  = { onToggle(id) },
+                label    = { Text("${src.icon} ${src.displayName}") }
+            )
+        }
+    }
+}
+
+@Composable
+fun SearchResultCard(result: com.nexus.vision.search.SearchResult) {
+    Card(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 8.dp, vertical = 2.dp),
+        colors = CardDefaults.cardColors(
+            containerColor = MaterialTheme.colorScheme.surfaceVariant
+        )
+    ) {
+        Column(modifier = Modifier.padding(8.dp)) {
+            Text(
+                text  = "${result.sourceName}",
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.primary
+            )
+            // 横スクロール対応の項目表示
+            Row(
+                modifier = Modifier.horizontalScroll(rememberScrollState())
+            ) {
+                result.fields.forEach { (key, value) ->
+                    if (value.isNotBlank()) {
+                        Column(modifier = Modifier.padding(end = 12.dp)) {
+                            Text(key,   style = MaterialTheme.typography.labelSmall,
+                                 color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            Text(value, style = MaterialTheme.typography.bodySmall)
+                        }
+                    }
+                }
+            }
+        }
     }
 }
