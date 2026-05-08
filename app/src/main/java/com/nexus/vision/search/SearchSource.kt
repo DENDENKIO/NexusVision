@@ -63,3 +63,12 @@ data class SearchResult(
     /** 詳細画面を開くIntent生成用（null=詳細なし）*/
     val detailAction: (() -> Unit)? = null
 )
+
+/**
+ * sourceId を持つソース（フィルタリング用）
+ * SearchSource と組み合わせて実装する
+ */
+interface IdentifiableSource : SearchSource {
+    val sourceId: String
+    override val icon: String get() = "🗄️"
+}

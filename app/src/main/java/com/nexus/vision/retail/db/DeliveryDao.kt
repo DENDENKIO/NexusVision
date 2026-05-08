@@ -27,6 +27,10 @@ interface DeliveryDao {
     @Query("SELECT * FROM delivery_records ORDER BY date DESC, createdAt DESC")
     suspend fun getAll(): List<DeliveryRecord>
 
+    // 件数取得（SearchSource.count() 用）
+    @Query("SELECT COUNT(*) FROM delivery_records")
+    suspend fun count(): Int
+
     // ── 企画別 ────────────────────────────────────────────────
     @Query("""
         SELECT * FROM delivery_records
