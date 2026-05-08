@@ -189,6 +189,8 @@
         <activity android:name=".retail.ui.DeliveryOcrActivity" />
         <activity android:name=".retail.ui.DeliveryListActivity" />
         <activity android:name=".retail.ui.ProductListActivity" />
+        <activity android:name=".retail.ui.CsvImportActivity"
+            android:label="CSVインポート" />
 
         <!-- カメラ撮影用 FileProvider -->
         <provider

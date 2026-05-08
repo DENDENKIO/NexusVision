@@ -38,4 +38,26 @@ interface ProductDao {
 
     @Query("SELECT COUNT(*) FROM product_master")
     suspend fun count(): Int
+
+    /**
+     * CSVインポート用 upsert
+     * janCode が一致 → productName/spec/lastDeliveryDate を上書き
+     * 一致なし → 新規追加
+     */
+    @Query("""
+        INSERT INTO product_master (janCode, productName, spec, registeredAt, lastDeliveryDate)
+        VALUES (:janCode, :productName, :spec, :registeredAt, :lastDeliveryDate)
+        ON CONFLICT(janCode)
+        DO UPDATE SET
+            productName      = excluded.productName,
+            spec             = excluded.spec,
+            lastDeliveryDate = excluded.lastDeliveryDate
+    """)
+    suspend fun upsert(
+        janCode:          String,
+        productName:      String,
+        spec:             String,
+        registeredAt:     Long,
+        lastDeliveryDate: String
+    )
 }

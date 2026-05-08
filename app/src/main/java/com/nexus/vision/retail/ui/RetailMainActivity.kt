@@ -86,6 +86,10 @@ class RetailMainActivity : AppCompatActivity() {
             MenuItem("🏷️", "商品データベース",
                 "JANコード検索・納品履歴確認", "#1A2A4A") {
                 startActivity(Intent(this, ProductListActivity::class.java))
+            },
+            MenuItem("📥", "CSVインポート",
+                "一括登録・更新（納品/商品）", "#333355") {
+                startActivity(Intent(this, CsvImportActivity::class.java))
             }
         ).forEach { item ->
             val card = LinearLayout(this).apply {

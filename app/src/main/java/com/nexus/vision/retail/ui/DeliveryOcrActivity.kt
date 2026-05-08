@@ -172,15 +172,26 @@ class DeliveryOcrActivity : AppCompatActivity() {
         btnRow.addView(retakeBtn, lp(0, 44.dp(), 1f).apply { marginStart = 8.dp() })
         root.addView(btnRow, lp(-1, -2))
 
-        // OCR確認テーブル (RecyclerView)
+        // OCR確認テーブル（横スクロール対応）
+        val tableContainer = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+        }
+
         val header = buildTableHeader()
-        root.addView(header, lp(-1, -2))
+        tableContainer.addView(header, lp(-2, -2))
 
         confirmRv = RecyclerView(this).apply {
             layoutManager = LinearLayoutManager(this@DeliveryOcrActivity)
             adapter = confirmAdapter
         }
-        root.addView(confirmRv, lp(-1, 0, 1f))
+        tableContainer.addView(confirmRv, LinearLayout.LayoutParams(-2, 0, 1f))
+
+        // HorizontalScrollView で包む
+        val hScroll = android.widget.HorizontalScrollView(this).apply {
+            isHorizontalScrollBarEnabled = true
+            addView(tableContainer)
+        }
+        root.addView(hScroll, lp(-1, 0, 1f))
 
         // 保存ボタン
         saveBtn = makeButton("💾 データベースに保存", "#1A7A3A") {
@@ -198,31 +209,39 @@ class DeliveryOcrActivity : AppCompatActivity() {
 
     private fun buildTableHeader(): LinearLayout {
         val dp = resources.displayMetrics.density
+        fun Int.dp() = (this * dp).toInt()
+
         return LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             setBackgroundColor(Color.parseColor("#1A1A3A"))
-            setPadding((4 * dp).toInt(), (6 * dp).toInt(), (4 * dp).toInt(), (6 * dp).toInt())
+            setPadding(4.dp(), 6.dp(), 4.dp(), 6.dp())
+
+            // 各列: ラベル to 固定幅dp
             listOf(
-                "日付"     to 1.1f,
-                "部門"     to 0.6f,
-                "JAN"     to 1.4f,
-                "メーカー" to 1.0f,
-                "商品名"   to 1.8f,
-                "規格"     to 1.0f,
-                "数量"     to 0.6f,
-                "備考"     to 1.0f
-            ).forEach { (name, w) ->
+                "日付"      to 90,
+                "部門"      to 44,
+                "JAN"      to 112,
+                "メーカー"  to 100,
+                "商品名"    to 200,
+                "規格"      to 90,
+                "数量"      to 48,
+                "備考"      to 120,
+            ).forEach { (name, widthDp) ->
                 addView(TextView(context).apply {
-                    text = name; textSize = 11f
+                    text = name
+                    textSize = 11f
                     setTextColor(Color.parseColor("#AACCFF"))
-                    layoutParams = LinearLayout.LayoutParams(0, -2, w)
+                    setSingleLine()
+                    layoutParams = LinearLayout.LayoutParams(widthDp.dp(), -2)
+                    setPadding(2.dp(), 0, 2.dp(), 0)
                 })
             }
-            // 操作列
+            // 操作ボタン列
             addView(TextView(context).apply {
-                text = "操作"; textSize = 11f
+                text = "操作"
+                textSize = 11f
                 setTextColor(Color.parseColor("#AACCFF"))
-                layoutParams = LinearLayout.LayoutParams((48 * dp).toInt(), -2)
+                layoutParams = LinearLayout.LayoutParams(44.dp(), -2)
             })
         }
     }
@@ -447,7 +466,9 @@ class OcrConfirmAdapter(
                 a.janCode == b.janCode && a.date == b.date
             override fun areContentsTheSame(a: DeliveryRecord, b: DeliveryRecord) = a == b
         }
-        private val COL_WEIGHTS = floatArrayOf(1.1f, 0.6f, 1.4f, 1.0f, 1.8f, 1.0f, 0.6f, 1.0f)
+        // ヘッダーと完全に一致させる（dp値）
+        private val COL_WIDTHS_DP = intArrayOf(90, 44, 112, 100, 200, 90, 48, 120)
+        private const val EDIT_BTN_DP = 44
     }
 
     inner class VH(val row: LinearLayout, val cells: List<TextView>, val editBtn: ImageButton)
@@ -456,22 +477,28 @@ class OcrConfirmAdapter(
     override fun onCreateViewHolder(parent: ViewGroup, viewType: Int): VH {
         val ctx = parent.context
         val dp  = ctx.resources.displayMetrics.density
+        fun Int.dp() = (this * dp).toInt()
+
         val row = LinearLayout(ctx).apply {
             orientation = LinearLayout.HORIZONTAL
-            setPadding((4*dp).toInt(), (5*dp).toInt(), (4*dp).toInt(), (5*dp).toInt())
+            setPadding(4.dp(), 5.dp(), 4.dp(), 5.dp())
         }
-        val cells = COL_WEIGHTS.map { w ->
+
+        val cells = COL_WIDTHS_DP.map { widthDp ->
             TextView(ctx).apply {
-                textSize = 10f; setTextColor(Color.parseColor("#DDDDEE"))
-                layoutParams = LinearLayout.LayoutParams(0, -2, w)
-                maxLines = 2; ellipsize = android.text.TextUtils.TruncateAt.END
+                textSize = 10f
+                setTextColor(Color.parseColor("#DDDDEE"))
+                setSingleLine()
+                ellipsize = android.text.TextUtils.TruncateAt.END
+                setPadding(2.dp(), 0, 2.dp(), 0)
+                layoutParams = LinearLayout.LayoutParams(widthDp.dp(), -2)
             }.also { row.addView(it) }
         }
+
         val editBtn = ImageButton(ctx).apply {
             setImageResource(android.R.drawable.ic_menu_edit)
             setBackgroundColor(Color.TRANSPARENT)
-            layoutParams = LinearLayout.LayoutParams(
-                (40*dp).toInt(), (40*dp).toInt())
+            layoutParams = LinearLayout.LayoutParams(EDIT_BTN_DP.dp(), 40.dp())
         }
         row.addView(editBtn)
         return VH(row, cells, editBtn)

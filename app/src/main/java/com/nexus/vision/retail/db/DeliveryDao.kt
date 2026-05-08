@@ -55,4 +55,40 @@ interface DeliveryDao {
         WHERE date = :date AND janCode = :jan AND quantity = :qty
     """)
     suspend fun countDuplicate(date: String, jan: String, qty: Int): Int
+
+    /**
+     * CSVインポート用 upsert
+     * date + janCode + quantity が一致 → 全フィールド上書き (REPLACE相当)
+     * 一致なし → 新規追加
+     */
+    @Query("""
+        INSERT INTO delivery_records
+            (projectName, date, department, janCode, maker, productName, spec, quantity, note, createdAt)
+        VALUES
+            (:projectName, :date, :department, :janCode, :maker, :productName, :spec, :quantity, :note, :createdAt)
+        ON CONFLICT(date, janCode, quantity)
+        DO UPDATE SET
+            projectName  = excluded.projectName,
+            department   = excluded.department,
+            maker        = excluded.maker,
+            productName  = excluded.productName,
+            spec         = excluded.spec,
+            note         = excluded.note
+    """)
+    suspend fun upsert(
+        projectName: String,
+        date:        String,
+        department:  String,
+        janCode:     String,
+        maker:       String,
+        productName: String,
+        spec:        String,
+        quantity:    Int,
+        note:        String,
+        createdAt:   Long
+    )
+
+    /** インポート結果確認用: 指定日付+JAN+数量のレコードを取得 */
+    @Query("SELECT * FROM delivery_records WHERE date=:date AND janCode=:jan AND quantity=:qty LIMIT 1")
+    suspend fun findByKey(date: String, jan: String, qty: Int): DeliveryRecord?
 }
