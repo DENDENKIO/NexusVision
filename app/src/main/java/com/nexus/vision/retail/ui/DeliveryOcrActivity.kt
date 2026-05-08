@@ -6,6 +6,7 @@ import android.content.pm.PackageManager
 import android.graphics.*
 import android.net.Uri
 import android.os.Bundle
+import android.util.Log
 import android.view.*
 import android.widget.Button
 import android.widget.EditText
@@ -29,11 +30,14 @@ import com.google.mlkit.vision.text.japanese.JapaneseTextRecognizerOptions
 import com.nexus.vision.retail.db.*
 import com.nexus.vision.retail.ocr.DeliveryOcrParser
 import com.nexus.vision.retail.ocr.BitmapPreprocessor
+import com.nexus.vision.retail.ocr.DocumentScannerHelper
 import com.nexus.vision.retail.repository.RetailRepository
 import com.nexus.vision.ocr.MlKitOcrEngine
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.activity.result.IntentSenderRequest
 import java.io.File
 
 /**
@@ -59,6 +63,7 @@ class DeliveryOcrActivity : AppCompatActivity() {
     private var photoUri: Uri? = null
     private val parsedRecords = mutableListOf<DeliveryRecord>()
     private lateinit var confirmAdapter: OcrConfirmAdapter
+    private lateinit var docScanHelper: DocumentScannerHelper
 
     // ── ランチャー ────────────────────────────────────────────
 
@@ -74,6 +79,12 @@ class DeliveryOcrActivity : AppCompatActivity() {
         if (granted) launchCamera() else toast("カメラ権限が必要です")
     }
 
+    private val scanLauncher = registerForActivityResult(
+        ActivityResultContracts.StartIntentSenderForResult()
+    ) { result ->
+        docScanHelper.handleResult(result.resultCode, result.data)
+    }
+
     // ─────────────────────────────────────────────────────────
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -84,6 +95,22 @@ class DeliveryOcrActivity : AppCompatActivity() {
 
         setContentView(buildLayout())
         title = "📷 納品伝票 OCR"
+
+        docScanHelper = DocumentScannerHelper(
+            activity   = this,
+            onScanned  = { uris ->
+                uris.firstOrNull()?.let { uri ->
+                    photoUri = uri
+                    runOcr(uri)
+                }
+            },
+            onError = { e ->
+                Log.w("DocScanner", "スキャナー使用不可: ${e.message}")
+                toast("スキャナー起動失敗。通常カメラを使用します")
+                launchCamera()
+            }
+        )
+        docScanHelper.init(maxPages = 1, fullMode = true)
     }
 
     // ── UI構築 ────────────────────────────────────────────────
@@ -135,10 +162,12 @@ class DeliveryOcrActivity : AppCompatActivity() {
             setPadding(0, 8.dp(), 0, 8.dp())
         }
         val cameraBtn = makeButton("📷 撮影", "#2255AA") { checkCameraAndLaunch() }
+        val scanBtn   = makeButton("🔍 スキャン", "#1A3A6A") { docScanHelper.startScan(scanLauncher) }
         val gallBtn   = makeButton("🖼 ギャラリー", "#225544") { galleryLauncher.launch("image/*") }
         retakeBtn     = makeButton("🔄 再撮影", "#444455") { checkCameraAndLaunch() }
         retakeBtn.visibility = View.GONE
         btnRow.addView(cameraBtn, lp(0, 44.dp(), 1f))
+        btnRow.addView(scanBtn,   lp(0, 44.dp(), 1f).apply { marginStart = 8.dp() })
         btnRow.addView(gallBtn,   lp(0, 44.dp(), 1f).apply { marginStart = 8.dp() })
         btnRow.addView(retakeBtn, lp(0, 44.dp(), 1f).apply { marginStart = 8.dp() })
         root.addView(btnRow, lp(-1, -2))
@@ -213,7 +242,8 @@ class DeliveryOcrActivity : AppCompatActivity() {
 
                 // ② MlKitOcrEngine.recognize(bitmap) → OcrResult（座標付き）
                 val engine    = MlKitOcrEngine()
-                val processed = BitmapPreprocessor.process(bitmap)
+                val rotated   = correctRotation(bitmap, uri)
+                val processed = BitmapPreprocessor.process(rotated)
                 val ocrResult = engine.recognize(processed)
                 engine.close()
 
@@ -323,6 +353,30 @@ class DeliveryOcrActivity : AppCompatActivity() {
             setBackgroundColor(Color.parseColor(color))
             setOnClickListener { onClick() }
         }
+
+    private fun correctRotation(bitmap: Bitmap, uri: Uri): Bitmap {
+        val exif = try {
+            contentResolver.openInputStream(uri)?.use {
+                androidx.exifinterface.media.ExifInterface(it)
+            }
+        } catch (e: Exception) { null } ?: return bitmap
+
+        val rotation = when (
+            exif.getAttributeInt(
+                androidx.exifinterface.media.ExifInterface.TAG_ORIENTATION,
+                androidx.exifinterface.media.ExifInterface.ORIENTATION_NORMAL
+            )
+        ) {
+            androidx.exifinterface.media.ExifInterface.ORIENTATION_ROTATE_90  -> 90f
+            androidx.exifinterface.media.ExifInterface.ORIENTATION_ROTATE_180 -> 180f
+            androidx.exifinterface.media.ExifInterface.ORIENTATION_ROTATE_270 -> 270f
+            else -> 0f
+        }
+        if (rotation == 0f) return bitmap
+
+        val matrix = Matrix().apply { postRotate(rotation) }
+        return Bitmap.createBitmap(bitmap, 0, 0, bitmap.width, bitmap.height, matrix, true)
+    }
 
     private fun lp(w: Int, h: Int, weight: Float = 0f) =
         LinearLayout.LayoutParams(w, h, weight)

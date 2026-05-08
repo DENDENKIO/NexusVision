@@ -110,6 +110,7 @@ dependencies {
     implementation("com.google.mlkit:text-recognition-japanese:16.0.1")
     implementation("com.google.mlkit:translate:17.0.3")
     implementation("com.google.mlkit:language-id:17.0.6")
+    implementation("com.google.android.gms:play-services-mlkit-document-scanner:16.0.0-beta1")
 
     // LiteRT-LM (Gemma-4-E2B) — Phase 9: AI エンジン有効化
     implementation("com.google.ai.edge.litertlm:litertlm-android:0.10.2")
