@@ -11,8 +11,12 @@ import androidx.recyclerview.widget.LinearLayoutManager
 import androidx.recyclerview.widget.RecyclerView
 import com.nexus.vision.retail.db.*
 import com.nexus.vision.retail.repository.RetailRepository
+import com.nexus.vision.retail.export.DeliveryExporter
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.*
+import android.net.Uri
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.appcompat.app.AlertDialog
 
 class DeliveryListActivity : AppCompatActivity() {
 
@@ -22,6 +26,22 @@ class DeliveryListActivity : AppCompatActivity() {
     // フィルター状態
     private var currentProject = ""
     private var currentQuery   = ""
+    private var currentRecords: List<DeliveryRecord> = emptyList()
+
+    private val saveCsvLauncher =
+        registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
+            if (result.resultCode == RESULT_OK) {
+                result.data?.data?.let { destUri ->
+                    lifecycleScope.launch(Dispatchers.IO) {
+                        DeliveryExporter.writeTo(this@DeliveryListActivity, destUri, currentRecords)
+                        withContext(Dispatchers.Main) {
+                            Toast.makeText(this@DeliveryListActivity,
+                                "✅ CSV保存完了", Toast.LENGTH_SHORT).show()
+                        }
+                    }
+                }
+            }
+        }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -58,6 +78,19 @@ class DeliveryListActivity : AppCompatActivity() {
             })
         }
         root.addView(searchBar, matchWidth(48.dp))
+
+        // CSV出力ボタン
+        val btnRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            setPadding(0, 4.dp, 0, 4.dp)
+        }
+        val csvBtn = Button(this).apply {
+            text = "📊 CSV出力"
+            textSize = 13f
+            setOnClickListener { exportCsv() }
+        }
+        btnRow.addView(csvBtn, LinearLayout.LayoutParams(-1, 44.dp))
+        root.addView(btnRow)
 
         // RecyclerView (表形式)
         val rv = RecyclerView(this).apply {
@@ -107,7 +140,38 @@ class DeliveryListActivity : AppCompatActivity() {
             } else {
                 repo.searchDeliveries(currentQuery, currentProject)
             }
+            currentRecords = results
             adapter.submitList(results)
+        }
+    }
+
+    private fun exportCsv() {
+        if (currentRecords.isEmpty()) {
+            Toast.makeText(this, "エクスポートするデータがありません", Toast.LENGTH_SHORT).show()
+            return
+        }
+        lifecycleScope.launch(Dispatchers.IO) {
+            val uri = try {
+                DeliveryExporter.export(this@DeliveryListActivity, currentRecords)
+            } catch (e: Exception) {
+                withContext(Dispatchers.Main) {
+                    Toast.makeText(this@DeliveryListActivity, "❌ CSV生成失敗: ${e.message}", Toast.LENGTH_SHORT).show()
+                }
+                return@launch
+            }
+            withContext(Dispatchers.Main) {
+                AlertDialog.Builder(this@DeliveryListActivity)
+                    .setTitle("📊 CSV出力 (${currentRecords.size}件)")
+                    .setMessage("出力方法を選択してください")
+                    .setPositiveButton("📤 共有") { _, _ ->
+                        DeliveryExporter.share(this@DeliveryListActivity, uri)
+                    }
+                    .setNegativeButton("💾 端末に保存") { _, _ ->
+                        saveCsvLauncher.launch(DeliveryExporter.createSaveIntent())
+                    }
+                    .setNeutralButton("キャンセル", null)
+                    .show()
+            }
         }
     }
 

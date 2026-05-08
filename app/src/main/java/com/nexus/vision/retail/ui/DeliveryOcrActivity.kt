@@ -28,6 +28,7 @@ import com.google.mlkit.vision.text.TextRecognition
 import com.google.mlkit.vision.text.japanese.JapaneseTextRecognizerOptions
 import com.nexus.vision.retail.db.*
 import com.nexus.vision.retail.ocr.DeliveryOcrParser
+import com.nexus.vision.retail.ocr.BitmapPreprocessor
 import com.nexus.vision.retail.repository.RetailRepository
 import com.nexus.vision.ocr.MlKitOcrEngine
 import kotlinx.coroutines.Dispatchers
@@ -212,7 +213,8 @@ class DeliveryOcrActivity : AppCompatActivity() {
 
                 // ② MlKitOcrEngine.recognize(bitmap) → OcrResult（座標付き）
                 val engine    = MlKitOcrEngine()
-                val ocrResult = engine.recognize(bitmap)
+                val processed = BitmapPreprocessor.process(bitmap)
+                val ocrResult = engine.recognize(processed)
                 engine.close()
 
                 // ③ DeliveryOcrParser.parseWithTable（TableReconstructor連携）
